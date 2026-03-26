@@ -905,23 +905,17 @@ $((() => {
             }
             const nextIdx = Math.min(targetIdx, newSwipes.length - 1);
 
-            // 优先使用高级 API setChatMessages（自动处理保存、刷新、事件派发）
+            // 直接修改底层引用，避开部分版本 setChatMessages 使用 _.merge 导致的长数组无法被短数组整个替换的幽灵 bug
+            stMsg.swipes = newSwipes;
+            stMsg.swipe_info = newSwipeInfo;
+            stMsg.swipe_id = nextIdx;
+            stMsg.mes = newSwipes[nextIdx];
+
+            // 优先使用高级 API 触发保存和刷新同步
             if (typeof setChatMessages === 'function') {
-                const ok = await safeSetChatMessages([{
-                    message_id: mesid,
-                    swipes: newSwipes,
-                    swipe_info: newSwipeInfo,
-                    swipe_id: nextIdx,
-                    message: newSwipes[nextIdx]
-                }]);
-                if (!ok) throw new Error("setChatMessages 返回失败");
+                await safeSetChatMessages([{ message_id: mesid }], { refresh: 'affected' });
             } else {
                 // 原生 ST 退避模式
-                stMsg.swipes = newSwipes;
-                stMsg.swipe_info = newSwipeInfo;
-                stMsg.swipe_id = nextIdx;
-                stMsg.mes = newSwipes[nextIdx];
-
                 if (typeof updateMessageBlock === 'function') {
                     updateMessageBlock(mesid, stMsg);
                 } else if (ctx && typeof ctx.updateMessageBlock === 'function') {
