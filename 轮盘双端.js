@@ -41,7 +41,17 @@ $((() => {
         'jumpToTarget', 'deleteMessage', 'editOrConfirm'
     ];
 
-    const DEFAULT_PROFILE = {
+    const DEFAULT_PROFILE_PC = {
+        enabledButtons: [...DEFAULT_ENABLED_BUTTONS],
+        buttonSize: 30,
+        menuRadius: 75,
+        toolbarMode: true,
+        toolbarCollapsed: false,
+        toolbarPosition: { x: 20, y: 100 },
+        mobileTriggerMode: 'longPress'
+    };
+
+    const DEFAULT_PROFILE_MOBILE = {
         enabledButtons: [...DEFAULT_ENABLED_BUTTONS],
         buttonSize: 60,
         menuRadius: 75,
@@ -75,8 +85,8 @@ $((() => {
                 _version: SETTINGS_VERSION,
                 modeOverride: 'auto',
                 profiles: {
-                    pc: JSON.parse(JSON.stringify(DEFAULT_PROFILE)),
-                    mobile: JSON.parse(JSON.stringify(DEFAULT_PROFILE))
+                    pc: JSON.parse(JSON.stringify(DEFAULT_PROFILE_PC)),
+                    mobile: JSON.parse(JSON.stringify(DEFAULT_PROFILE_MOBILE))
                 }
             };
         }
@@ -1943,8 +1953,8 @@ $((() => {
 
         // Deep copy of profiles for editing
         let tempProfiles = {
-            pc: JSON.parse(JSON.stringify(currentSettings.profiles?.pc || DEFAULT_PROFILE)),
-            mobile: JSON.parse(JSON.stringify(currentSettings.profiles?.mobile || DEFAULT_PROFILE))
+            pc: JSON.parse(JSON.stringify(currentSettings.profiles?.pc || DEFAULT_PROFILE_PC)),
+            mobile: JSON.parse(JSON.stringify(currentSettings.profiles?.mobile || DEFAULT_PROFILE_MOBILE))
         };
         let tempModeOverride = currentSettings.modeOverride || 'auto';
         let currentTab = window.kRadialLastSettingsTab || (isMobileDevice() ? 'mobile' : 'pc');
