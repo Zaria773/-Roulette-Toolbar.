@@ -1068,12 +1068,17 @@ $((() => {
 
     async function action_jumpToTarget() {
         if (!SillyTavern?.callGenericPopup) { toastr.error('ST 弹窗 API 不可用'); return; }
-        const input = await ST.popup('请输入目标楼层号：', SillyTavern?.POPUP_TYPE?.INPUT ?? 'input', '');
+        const input = await ST.popup('请输入目标楼层号 (支持负数，如 -5 代表倒数第5楼)：', SillyTavern?.POPUP_TYPE?.INPUT ?? 'input', '');
         if (input === undefined || String(input).trim() === '') return;
-        const t = parseInt(input, 10);
-        if (isNaN(t) || t < 0) { toastr.error('请输入有效的数字楼层号'); return; }
+        let t = parseInt(input, 10);
+        if (isNaN(t)) { toastr.error('请输入有效的数字楼层号'); return; }
 
         const maxId = safeGetLastMessageId();
+        
+        if (t < 0) {
+            t = Math.max(0, maxId + t + 1);
+        }
+
         if (t > maxId) { toastr.error(`楼层 ${t} 不存在（当前最大 ${maxId}）`); return; }
 
         try {
