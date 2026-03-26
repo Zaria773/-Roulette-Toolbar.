@@ -896,18 +896,44 @@ $((() => {
                 toastr.warning('只有一个 swipe，无法删除'); return;
             }
             const targetIdx = Number.isInteger(stMsg.swipe_id) ? stMsg.swipe_id : 0;
-            stMsg.swipes.splice(targetIdx, 1);
-            if (Array.isArray(stMsg.swipe_info) && stMsg.swipe_info.length > targetIdx) {
-                stMsg.swipe_info.splice(targetIdx, 1);
+
+            const newSwipes = [...stMsg.swipes];
+            newSwipes.splice(targetIdx, 1);
+            const newSwipeInfo = Array.isArray(stMsg.swipe_info) ? [...stMsg.swipe_info] : [];
+            if (newSwipeInfo.length > targetIdx) {
+                newSwipeInfo.splice(targetIdx, 1);
             }
-            const nextIdx = Math.min(targetIdx, stMsg.swipes.length - 1);
-            stMsg.swipe_id = nextIdx;
-            stMsg.mes = stMsg.swipes[nextIdx];
-            if (typeof ctx.updateMessageBlock === 'function') {
-                ctx.updateMessageBlock(mesid, stMsg);
-            }
-            if (typeof ctx.saveChat === 'function') {
-                await ctx.saveChat();
+            const nextIdx = Math.min(targetIdx, newSwipes.length - 1);
+
+            // 优先使用高级 API setChatMessages（自动处理保存、刷新、事件派发）
+            if (typeof setChatMessages === 'function') {
+                const ok = await safeSetChatMessages([{
+                    message_id: mesid,
+                    swipes: newSwipes,
+                    swipe_info: newSwipeInfo,
+                    swipe_id: nextIdx,
+                    message: newSwipes[nextIdx]
+                }]);
+                if (!ok) throw new Error("setChatMessages 返回失败");
+            } else {
+                // 原生 ST 退避模式
+                stMsg.swipes = newSwipes;
+                stMsg.swipe_info = newSwipeInfo;
+                stMsg.swipe_id = nextIdx;
+                stMsg.mes = newSwipes[nextIdx];
+
+                if (typeof updateMessageBlock === 'function') {
+                    updateMessageBlock(mesid, stMsg);
+                } else if (ctx && typeof ctx.updateMessageBlock === 'function') {
+                    ctx.updateMessageBlock(mesid, stMsg);
+                }
+
+                if (typeof eventSource !== 'undefined' && typeof tavern_events !== 'undefined') {
+                    eventSource.emit(tavern_events.CHAT_CHANGED);
+                }
+                if (typeof ctx.saveChat === 'function') {
+                    await ctx.saveChat();
+                }
             }
             toastr.success(`已删除第 ${mesid} 楼的 swipe #${targetIdx + 1}`);
         } catch (e) {
@@ -1023,23 +1049,6 @@ $((() => {
 
     function action_jumpToLatest() { robustAutoJump(false, true); }
 
-    // ─── FIX #1 ────────────────────────────────────────────────────────────────
-    // Reliable scroll-to-message that works for ALL message states:
-    //   • Normally visible messages
-    //   • Messages hidden by ST's context limit (display:none)
-    //   • Messages inside any XML / CoT / custom widget wrapper
-    //
-    // Root cause of previous failures:
-    //   offsetTop is relative to offsetParent, not to #chat. If the offsetParent
-    //   chain doesn't go through #chat directly the position is completely wrong.
-    //   scrollIntoView() silently does nothing on display:none elements.
-    //
-    // Universal fix:
-    //   getBoundingClientRect().top − chat.getBoundingClientRect().top + chat.scrollTop
-    //   = exact pixel offset from the top of #chat's scroll content, regardless of
-    //   DOM nesting depth, regardless of visibility state.
-    //   For hidden elements we do a zero-flash reveal: visibility:hidden + display:flex
-    //   (matching ST's .mes layout) long enough to resolve the rect, then restore.
     function getScrollPositionOf(el, chat) {
         // chat.getBoundingClientRect() is stable (chat fills the screen and never moves).
         // Cache it for the duration of a scroll action; cleared in hideMenu.
@@ -1074,7 +1083,7 @@ $((() => {
         if (isNaN(t)) { toastr.error('请输入有效的数字楼层号'); return; }
 
         const maxId = safeGetLastMessageId();
-        
+
         if (t < 0) {
             t = Math.max(0, maxId + t + 1);
         }
@@ -1143,17 +1152,6 @@ $((() => {
         }
     }
 
-    // ─── Mobile paragraph edit ──────────────────────────────────────────────────
-    // Uses caretRangeFromPoint for precise press-position targeting and
-    // fingerprint-based matching for robust raw text lookup.
-    //
-    // *** CRITICAL: never use retrieveDisplayedMessage(mesid).text() ***
-    // jQuery .text() strips ALL HTML tags — destroying every custom widget,
-    // <details> block, status panel, and beautification template in the message.
-    // The correct approach is a targeted string replacement inside the raw
-    // SillyTavern.chat[mesid].mes — touch nothing except the one edited segment.
-
-    // ── Fingerprinting: strip all formatting to compare content identity ──
     function fingerprint(text) {
         if (!text) return '';
         return text
@@ -1335,12 +1333,6 @@ $((() => {
         return segs;
     }
 
-    // ── Multi-strategy find & replace ────────────────────────────────────────
-    // Strategy 1: Exact indexOf
-    // Strategy 2: Bracket variant
-    // Strategy 3: Paragraph-level fingerprint match (split by \n\n)
-    // Strategy 4: Line-level fingerprint match (split by \n)
-    // Strategy 5: Whole-text stripped indexOf with position mapping
     function findAndReplace(rawMes, originalText, replacement) {
         const trimmed = originalText.trim();
         if (!trimmed) return null;
@@ -1506,11 +1498,6 @@ $((() => {
         }
     }
 
-    // Read ST's accent/border CSS vars and write them into our container's
-    // custom properties so hover/border colours feel native to the current theme.
-    // applyTheme: called on every showMenu().
-    // Reads ST's native interactive element styles directly — no luminance math,
-    // no hardcoded colours. Falls back to safe neutrals when ST vars are absent.
     function applyTheme(containerEl) {
         if (!containerEl) return;
         const parentDoc = window.parent.document;
@@ -2311,9 +2298,6 @@ $((() => {
 
     // ── Mouse handlers (PC) ─────────────────────────────────────────────────
     function handleMouseMove(e) { updateSelection(e.clientX, e.clientY); }
-    // Suppress dblclick on touch devices: mobile Chrome synthesises a dblclick
-    // from two fast taps. We track the last touchend timestamp and ignore any
-    // dblclick that fires within 600ms of it.
     let lastTouchEndTime = 0;
     let lastTapTime = 0;
     let lastTapCoords = { x: 0, y: 0 };
@@ -2394,7 +2378,7 @@ $((() => {
         lastTouchEndTime = Date.now(); // record so dblclick handler can ignore synthetic events
         if (touchTimer) clearTimeout(touchTimer);
         isPossiblyLongPress = false;
-        
+
         if (menuVisible) {
             if (!selectedButton) {
                 // Finger lifted outside any button → just dismiss
@@ -2436,10 +2420,6 @@ $((() => {
         );
     }
 
-    // Shadow-div technique: create an invisible div with identical textarea styles,
-    // copy all content BEFORE the selection start into it. The div's rendered height
-    // equals the vertical offset of the selected text inside the textarea.
-    // Then scroll to place that position at EDITOR_SCROLL_ALIGNMENT_RATIO (30%).
     function scrollToTextareaMatch(ta) {
         try {
             const parentDoc = window.parent.document;
