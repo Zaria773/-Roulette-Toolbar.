@@ -1161,6 +1161,149 @@ $((() => {
             .trim();
     }
 
+    // ── iframe 遮罩：让 iframe 美化区域也能唤出轮盘 ──────────────────────────
+    const IFRAME_OVERLAY_CLASS = 'k-radial-iframe-overlay';
+
+    function patchIframeOverlays() {
+        const parentDoc = window.parent.document;
+        // 找到所有 .mes_text 内的 iframe（ST 将 ```html 代码块渲染为 iframe）
+        parentDoc.querySelectorAll('.mes_text iframe').forEach(iframe => {
+            const wrapper = iframe.parentElement;
+            if (!wrapper || wrapper.querySelector('.' + IFRAME_OVERLAY_CLASS)) return;
+
+            // 确保 wrapper 支持绝对定位子元素
+            const wrapperPos = getComputedStyle(wrapper).position;
+            if (wrapperPos === 'static') wrapper.style.position = 'relative';
+
+            const overlay = parentDoc.createElement('div');
+            overlay.className = IFRAME_OVERLAY_CLASS;
+            overlay.style.cssText = 'position:absolute;inset:0;z-index:1;background:transparent;cursor:pointer;';
+            // 标记以便智能编辑识别
+            overlay.dataset.kRadialIframeOverlay = 'true';
+
+            // ── 事件转发逻辑 ──
+            // 长按 / 双击 → 转发到父级 .mes 卡片以唤出轮盘
+            // 短单击 → 移除遮罩 pointer-events 让 iframe 接管（保留卡片翻转等交互）
+            let overlayTouchTimer = null;
+            let overlayTouchMoved = false;
+
+            overlay.addEventListener('touchstart', (e) => {
+                overlayTouchMoved = false;
+                const touch = e.touches[0];
+                const mesCard = overlay.closest('.mes');
+                if (!mesCard) return;
+
+                overlayTouchTimer = setTimeout(() => {
+                    if (!overlayTouchMoved) {
+                        // 长按成功 → 触发轮盘
+                        pressCoords = { x: touch.clientX, y: touch.clientY };
+                        lastTriggerWasTouch = true;
+                        showMenu(touch.clientX, touch.clientY, mesCard);
+                    }
+                }, LONG_PRESS_DURATION);
+            }, { passive: true });
+
+            overlay.addEventListener('touchmove', (e) => {
+                if (menuVisible) {
+                    // 轮盘已打开 → 转发 touchmove 用于按钮选择
+                    const t = e.touches[0];
+                    if (!selRafId) {
+                        selRafId = requestAnimationFrame(() => {
+                            selRafId = null;
+                            updateSelection(t.clientX, t.clientY);
+                        });
+                    }
+                    if (e.cancelable) e.preventDefault();
+                } else {
+                    overlayTouchMoved = true;
+                    if (overlayTouchTimer) { clearTimeout(overlayTouchTimer); overlayTouchTimer = null; }
+                }
+            }, { passive: false });
+
+            overlay.addEventListener('touchend', (e) => {
+                if (overlayTouchTimer) { clearTimeout(overlayTouchTimer); overlayTouchTimer = null; }
+
+                if (menuVisible) {
+                    lastTouchEndTime = Date.now();
+                    if (selectedButton) executeSelected();
+                    else hideMenu();
+                    return;
+                }
+
+                // 短按 → 临时让 iframe 接管以支持内部交互
+                if (!overlayTouchMoved) {
+                    overlay.style.pointerEvents = 'none';
+                    setTimeout(() => { overlay.style.pointerEvents = ''; }, 800);
+                }
+            }, { passive: true });
+
+            // PC 双击转发
+            overlay.addEventListener('dblclick', (e) => {
+                const mesCard = overlay.closest('.mes');
+                if (!mesCard) return;
+                e.preventDefault();
+                lastTriggerWasTouch = false;
+                pressCoords = { x: e.clientX, y: e.clientY };
+                showMenu(e.clientX, e.clientY, mesCard);
+            });
+
+            // PC 单击 → 临时穿透
+            overlay.addEventListener('click', (e) => {
+                if (e.detail === 1) { // 只响应单击，双击由 dblclick 处理
+                    overlay.style.pointerEvents = 'none';
+                    setTimeout(() => { overlay.style.pointerEvents = ''; }, 800);
+                }
+            });
+
+            wrapper.appendChild(overlay);
+        });
+    }
+
+    // ── 正则反查：在原始消息中定位 iframe 美化对应的原始标签段落 ────────────────
+    function findRegexMatchForIframe(rawMes) {
+        // 获取所有启用的、用于显示的正则
+        let regexes = [];
+        try {
+            if (typeof getTavernRegexes === 'function') {
+                regexes = []
+                    .concat(getTavernRegexes({ type: 'global' }))
+                    .concat(getTavernRegexes({ type: 'character' }))
+                    .filter(r => r.enabled && r.destination?.display);
+            }
+        } catch (e) {
+            console.warn('[RadialMenu] getTavernRegexes failed:', e);
+        }
+
+        // 筛选：只关注 replaceString 中含有 <!DOCTYPE 或 <html 的正则（即 iframe 类美化）
+        const iframeRegexes = regexes.filter(r => {
+            const rs = r.replace_string || '';
+            return rs.includes('<!DOCTYPE') || rs.includes('<html') || rs.includes('<!doctype');
+        });
+
+        for (const regex of iframeRegexes) {
+            try {
+                // find_regex 形如 "/pattern/flags"，需要解析
+                const raw = regex.find_regex;
+                const slashIdx = raw.lastIndexOf('/');
+                const pattern = raw.slice(1, slashIdx);
+                const flags = raw.slice(slashIdx + 1).replace('g', ''); // 去掉 g 只取第一个匹配
+                const re = new RegExp(pattern, flags);
+                const match = re.exec(rawMes);
+                if (match) {
+                    return {
+                        matchedText: match[0],
+                        index: match.index,
+                        length: match[0].length,
+                        regexName: regex.script_name || regex.id,
+                    };
+                }
+            } catch (e) {
+                console.warn('[RadialMenu] regex exec failed for', regex.script_name, e);
+            }
+        }
+        return null;
+    }
+
     // ── caretRangeFromPoint: get the text node + line at press position ──
     function getTextAtPoint(parentDoc, x, y) {
         // Try browser-native API first
@@ -1202,7 +1345,76 @@ $((() => {
         const mesText = $(card).find('.mes_text')[0];
         if (!mesText) { toastr.warning('找不到 .mes_text'); return; }
 
-        // ── Step 1: Identify the pressed paragraph ──────────────────────────
+        const mesid = $(card).attr('mesid');
+        if (mesid === undefined) { toastr.error('无法获取楼层 ID'); return; }
+        const mesidNum = parseInt(mesid, 10);
+
+        // ── Step 0: 检测是否按在 iframe 美化遮罩上 ─────────────────────────
+        const hitEl = parentDoc.elementFromPoint(pressCoords.x, pressCoords.y);
+        const isIframeZone = hitEl && (
+            hitEl.dataset?.kRadialIframeOverlay === 'true'
+            || hitEl.tagName === 'IFRAME'
+            || $(hitEl).closest('.' + IFRAME_OVERLAY_CLASS).length > 0
+        );
+
+        if (isIframeZone) {
+            // ── iframe 区域 → 正则反查编辑 ──────────────────────────────────
+            const ctx = (typeof SillyTavern !== 'undefined') ? SillyTavern.getContext() : null;
+            const rawMes = ctx?.chat?.[mesidNum]?.mes ?? '';
+            const regexMatch = findRegexMatchForIframe(rawMes);
+
+            if (!regexMatch) {
+                // 找不到对应正则 → fallback 到 ST 原生整楼编辑
+                toastr.info('该区域为美化前端，已打开整楼编辑');
+                const $mesCard = $(card);
+                if (!clickFirstVisible($mesCard, EDIT_CONFIG.SELECTORS.EDIT_BUTTONS)) {
+                    toastr.warning('无法打开编辑器');
+                }
+                return;
+            }
+
+            // 弹窗编辑原始标签段落
+            const $editWrapper = $(`
+                <div style="width:100%;">
+                    <div style="margin-bottom:8px;font-weight:600;">编辑美化原始标签  <span style="font-size:0.8em;opacity:0.6;">(${regexMatch.regexName})</span></div>
+                    <textarea id="k-radial-edit-textarea" style="
+                        width:100%; min-height:120px; max-height:60vh; resize:vertical;
+                        padding:10px; border-radius:8px; font-size:13px; line-height:1.6;
+                        border:1px solid rgba(128,128,128,0.3); background:rgba(0,0,0,0.05);
+                        color:inherit; font-family:'Consolas','Monaco',monospace; box-sizing:border-box;
+                        overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+                        white-space:pre-wrap; word-break:break-all;
+                    ">${$('<span/>').text(regexMatch.matchedText).html()}</textarea>
+                </div>
+            `);
+
+            setTimeout(() => {
+                const ta = $editWrapper.find('#k-radial-edit-textarea')[0];
+                if (ta) { ta.focus(); ta.setSelectionRange(0, 0); }
+            }, 100);
+
+            let editedText;
+            if (typeof SillyTavern !== 'undefined' && SillyTavern.Popup) {
+                const popup = new SillyTavern.Popup($editWrapper, SillyTavern.POPUP_TYPE.CONFIRM, '', { okButton: '保存', cancelButton: '取消' });
+                const result = await popup.show();
+                if (!result) return;
+                editedText = $editWrapper.find('#k-radial-edit-textarea').val();
+            } else {
+                toastr.error('弹窗 API 不可用'); return;
+            }
+            if (editedText === undefined || editedText === null) return;
+
+            // 精确 splice 回 rawMes
+            const newMes = rawMes.slice(0, regexMatch.index) + editedText + rawMes.slice(regexMatch.index + regexMatch.length);
+            const ok = await safeSetChatMessages(
+                [{ message_id: mesidNum, message: newMes }]
+            );
+            if (!ok) { toastr.error('保存失败'); return; }
+            toastr.success('美化标签已保存');
+            return;
+        }
+
+        // ── Step 1: 常规段落编辑 ─────────────────────────────────────────────
         let originalText = '';
         let pressedNode = null;
 
@@ -1237,10 +1449,6 @@ $((() => {
         }
 
         if (!originalText.trim()) { toastr.warning('找不到可编辑的段落'); return; }
-
-        const mesid = $(pressedNode).closest('.mes').attr('mesid')
-            ?? $(card).attr('mesid');
-        if (mesid === undefined) { toastr.error('无法获取楼层 ID'); return; }
 
         // ── Step 2: Popup ───────────────────────────────────────────────────
         const $editWrapper = $(`
@@ -2518,6 +2726,12 @@ $((() => {
                 safeEventOn('MESSAGE_RECEIVED', () => setTimeout(obs, 300));
                 safeEventOn('MESSAGE_DELETED', () => setTimeout(obs, 300));
             }
+            // ── iframe 遮罩补丁 ──
+            patchIframeOverlays();
+            safeEventOn('CHAT_CHANGED', () => setTimeout(patchIframeOverlays, 500));
+            safeEventOn('MESSAGE_RECEIVED', () => setTimeout(patchIframeOverlays, 500));
+            safeEventOn('CHARACTER_MESSAGE_RENDERED', () => setTimeout(patchIframeOverlays, 500));
+
             log('双端事件绑定成功。');
         } else {
             console.warn('[PC_RadialMenu_v2] 未找到 #chat 元素');
