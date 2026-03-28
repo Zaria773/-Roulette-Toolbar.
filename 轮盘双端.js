@@ -3,14 +3,14 @@ $(
     'use strict';
 
     const MENU_CONTAINER_ID = 'k-pc-radial-menu-container-v5-2-opt';
-    const BUTTON_CLASS = 'k-pc-radial-button-v5-2-opt';
+    const BUTTON_CLASS = 'k-radial-node-v5-2-opt';
     const TOGGLE_CLASS = 'k-pc-radial-toggle-switch';
     const STYLE_ID = 'k-pc-radial-styles-v5-2-opt';
     const SETTINGS_STYLE_ID = 'k-pc-radial-settings-styles';
     const SELECTED_CLASS = 'selected';
     const MENU_RADIUS = 75;
     const TOOLBAR_CONTAINER_ID = 'k-pc-toolbar-container';
-    const TOOLBAR_BTN_CLASS = 'k-pc-toolbar-btn';
+    const TOOLBAR_BTN_CLASS = 'k-radial-toolbar-node';
 
     function isMobileDevice() {
       return (
@@ -60,6 +60,7 @@ $(
       toolbarCollapsed: false,
       toolbarPosition: { x: 20, y: 100 },
       mobileTriggerMode: 'longPress',
+      preventDoubleTapDefault: false,
     };
 
     const DEFAULT_PROFILE_MOBILE = {
@@ -71,6 +72,7 @@ $(
       toolbarCollapsed: false,
       toolbarPosition: { x: 20, y: 100 },
       mobileTriggerMode: 'longPress',
+      preventDoubleTapDefault: false,
     };
 
     // ── 设置持久化 ──
@@ -122,6 +124,7 @@ $(
           toolbarCollapsed: false,
           toolbarPosition: parsed.toolbarPosition || { x: 20, y: 100 },
           mobileTriggerMode: 'longPress',
+          preventDoubleTapDefault: !!parsed.preventDoubleTapDefault,
         };
         return {
           _version: SETTINGS_VERSION,
@@ -294,7 +297,7 @@ $(
     let pressCoords = { x: 0, y: 0 };
     let lastTriggerWasTouch = false;
 
-    let isAutoJumpEnabled = localStorage.getItem('k-pc-radial-auto-jump') !== 'false';
+    const isAutoJumpEnabled = localStorage.getItem('k-pc-radial-auto-jump') !== 'false';
 
     const EDIT_CONFIG = {
       RE_ENTRY_GUARD_DELAY: 100,
@@ -426,6 +429,9 @@ $(
         'beforeend',
         `<style id="${STYLE_ID}">
     #${MENU_CONTAINER_ID} { display: none; }
+    
+    /* ── 强行剥离浏览器原生的双击延迟判定，确保移动端双击丝滑 ── */
+    .mes { touch-action: manipulation !important; }
 
     /* ── All colour tokens are runtime-injected by applyTheme()       ── */
     /* ── CSS here only defines structure/geometry/transitions         ── */
@@ -447,7 +453,7 @@ $(
         background-color: var(--rb-bg);
         color:            var(--rb-text);
         border:           1.5px solid var(--rb-border);
-        border-radius:    50%;
+        border-radius:    50% !important;
         display:          flex !important;
         align-items:      center;
         justify-content:  center;
@@ -750,6 +756,23 @@ $(
         saveSettings(currentSettings);
       }
 
+      // Buttons
+      const buttonsConfig = getActiveButtonsConfig();
+
+      // Clamp position to viewport bounds to prevent off-screen toolbars (especially when switching PC->Mobile)
+      const parentWin = window.parent;
+      const safeW = (effective.buttonSize || 60) + 10;
+      const safeH = 30 + buttonsConfig.length * (effective.buttonSize ? effective.buttonSize * 0.8 : 45); // Approximate height
+      const maxX = Math.max(0, parentWin.innerWidth - safeW);
+      const maxY = Math.max(0, parentWin.innerHeight - safeH);
+
+      if (pos.x > maxX || pos.x < 0 || pos.y > maxY || pos.y < 0) {
+        pos.x = Math.max(10, Math.min(pos.x, maxX));
+        pos.y = Math.max(10, Math.min(pos.y, maxY));
+        effective.toolbarPosition = pos;
+        saveSettings(currentSettings);
+      }
+
       container.style.left = `${pos.x}px`;
       container.style.top = `${pos.y}px`;
 
@@ -759,8 +782,6 @@ $(
       handle.title = '拖拽移动 / 单击收起展开';
       container.appendChild(handle);
 
-      // Buttons
-      const buttonsConfig = getActiveButtonsConfig();
       const btnEls = [];
       buttonsConfig.forEach(config => {
         const btn = parentDoc.createElement('div');
@@ -1327,8 +1348,11 @@ $(
       let bestEnd = -1;
 
       // 在全量源码内滑动比对
-      for (let i = 0; i <= searchSpace.length - (T.length * 0.4); i++) {
-        let score = 0, tIdx = 0, sIdx = i, errors = 0;
+      for (let i = 0; i <= searchSpace.length - T.length * 0.4; i++) {
+        let score = 0,
+          tIdx = 0,
+          sIdx = i,
+          errors = 0;
         while (tIdx < T.length && sIdx < searchSpace.length && errors < 50) {
           if (searchSpace[sIdx] === T[tIdx]) {
             score++;
@@ -1340,19 +1364,32 @@ $(
             let synced = false;
             for (let look = 1; look <= 3; look++) {
               if (tIdx + look < T.length && searchSpace[sIdx] === T[tIdx + look]) {
-                tIdx += look; synced = true; break;
+                tIdx += look;
+                synced = true;
+                break;
               }
               if (sIdx + look < searchSpace.length && searchSpace[sIdx + look] === T[tIdx]) {
-                sIdx += look; synced = true; break;
+                sIdx += look;
+                synced = true;
+                break;
               }
             }
-            if (!synced) { sIdx++; tIdx++; } // 两败俱伤往前走
+            if (!synced) {
+              sIdx++;
+              tIdx++;
+            } // 两败俱伤往前走
           }
         }
         const matchRatio = score / T.length;
-        if (matchRatio > 0.65) { // 核心容错率：允许 35% 的外部干扰！
+        if (matchRatio > 0.65) {
+          // 核心容错率：允许 35% 的外部干扰！
           // 若之前没有最佳得分，或者新得分碾压旧得分(大于10%)，或者得分相近但坐标更接近肉眼预估光标位置：
-          if (bestScore === -1 || matchRatio > bestScore + 0.1 || (Math.abs(matchRatio - bestScore) <= 0.1 && Math.abs(i - expectedIndex) < Math.abs(bestStart - expectedIndex))) {
+          if (
+            bestScore === -1 ||
+            matchRatio > bestScore + 0.1 ||
+            (Math.abs(matchRatio - bestScore) <= 0.1 &&
+              Math.abs(i - expectedIndex) < Math.abs(bestStart - expectedIndex))
+          ) {
             bestScore = matchRatio;
             bestStart = i;
             // 后撤剔除结尾多匹配的冗余量
@@ -1376,7 +1413,7 @@ $(
       if (!targetFinger) return null;
 
       const expectedIndex = preFinger.length;
-      
+
       const matchResult = fuzzyFindFingerprint(rawFinger, targetFinger, expectedIndex);
       if (!matchResult) return null;
 
@@ -1418,8 +1455,17 @@ $(
     }
 
     // ── 段落编辑弹窗（统一 UI，双端共用）──────────────────────────────────────
-    async function showParagraphEditPopup(mesid, paragraphText, startIndex, endIndex, exactStartOffset, exactEndOffset) {
-      log(`[编辑流程] showParagraphEditPopup mesid=${mesid}, range=[${startIndex}:${endIndex}], text="${paragraphText.substring(0, 40)}"`);
+    async function showParagraphEditPopup(
+      mesid,
+      paragraphText,
+      startIndex,
+      endIndex,
+      exactStartOffset,
+      exactEndOffset,
+    ) {
+      log(
+        `[编辑流程] showParagraphEditPopup mesid=${mesid}, range=[${startIndex}:${endIndex}], text="${paragraphText.substring(0, 40)}"`,
+      );
       const $editWrapper = $(`
             <div style="width:100%;">
                 <div style="margin-bottom:8px;font-weight:600;">编辑段落 (楼层 ${mesid})</div>
@@ -1442,11 +1488,11 @@ $(
 
           if (exactStartOffset !== undefined && exactEndOffset !== undefined) {
             ta.setSelectionRange(exactStartOffset, exactEndOffset);
-            
+
             // 比例估算法：使光标大致出现在视口顶部约 25% 的位置
             const ratio = exactStartOffset / Math.max(1, ta.value.length);
             const cursorY = ta.scrollHeight * ratio;
-            const targetScrollTop = cursorY - (ta.clientHeight * 0.25);
+            const targetScrollTop = cursorY - ta.clientHeight * 0.25;
             ta.scrollTop = Math.max(0, targetScrollTop);
           }
         }
@@ -1569,7 +1615,14 @@ $(
 
       const exactStartOffset = result.matchRawStart - result.startIndex;
       const exactEndOffset = result.matchRawEnd + 1 - result.startIndex;
-      await showParagraphEditPopup(mesid, result.paragraphText, result.startIndex, result.endIndex, exactStartOffset, exactEndOffset);
+      await showParagraphEditPopup(
+        mesid,
+        result.paragraphText,
+        result.startIndex,
+        result.endIndex,
+        exactStartOffset,
+        exactEndOffset,
+      );
     }
 
     // ── iframe 内选区编辑 ────────────────────────────────────────────────────
@@ -1604,7 +1657,9 @@ $(
       }
 
       // 指纹反查（用近似 precedingText）
-      log(`[编辑流程] iframe 指纹反查, precedingText长度=${approxPrecedingText.length}, selectedText="${selectedText.substring(0, 30)}"`);
+      log(
+        `[编辑流程] iframe 指纹反查, precedingText长度=${approxPrecedingText.length}, selectedText="${selectedText.substring(0, 30)}"`,
+      );
       const result = findParagraphFromSelection(rawMes, approxPrecedingText, selectedText);
       if (!result) {
         log('[编辑流程] ❌ 指纹反查失败，fallback 整楼编辑');
@@ -1612,7 +1667,9 @@ $(
         handleSmartEdit(iframe.closest('.mes'));
         return;
       }
-      log(`[编辑流程] ✅ 反查成功, paragraph[${result.startIndex}:${result.endIndex}]="${result.paragraphText.substring(0, 40)}"`);
+      log(
+        `[编辑流程] ✅ 反查成功, paragraph[${result.startIndex}:${result.endIndex}]="${result.paragraphText.substring(0, 40)}"`,
+      );
 
       // 清理 iframe 内选区
       try {
@@ -1634,7 +1691,14 @@ $(
       const exactStartOffset = result.matchRawStart - result.startIndex;
       const exactEndOffset = result.matchRawEnd + 1 - result.startIndex;
       log('[编辑流程] 准备调用 showParagraphEditPopup...');
-      await showParagraphEditPopup(mesid, result.paragraphText, result.startIndex, result.endIndex, exactStartOffset, exactEndOffset);
+      await showParagraphEditPopup(
+        mesid,
+        result.paragraphText,
+        result.startIndex,
+        result.endIndex,
+        exactStartOffset,
+        exactEndOffset,
+      );
     }
 
     // ── 浮动铅笔按钮 UI 注入 ────────────────────────────────────────────────
@@ -1733,7 +1797,7 @@ $(
           if (rects && rects.length > 0) {
             const lastRect = rects[rects.length - 1]; // 精确定位到选取的最后一行末尾
             btn.style.display = 'flex'; // 使用 flex 使图标居中
-            
+
             // 应用动态大小
             const eff = getEffectiveSettings();
             const pSize = eff.pencilSize || 36;
@@ -1742,9 +1806,9 @@ $(
             btn.style.fontSize = `${Math.floor(pSize * 0.45)}px`;
 
             btn.style.top = `${lastRect.bottom + 8}px`; // 指针/选区末尾的正下方
-            
+
             // 按钮水平中点对齐选区的终点像素 (lastRect.right)
-            let leftPos = lastRect.right - (pSize / 2);
+            let leftPos = lastRect.right - pSize / 2;
             leftPos = Math.max(10, Math.min(leftPos, parentWin.innerWidth - pSize - 10));
             btn.style.left = `${leftPos}px`;
           }
@@ -1820,14 +1884,16 @@ $(
 
           // 关键修复：srcdoc iframe 的 document 级 selectionchange 不触发！
           // 改用 body 级 mouseup/touchend + 延迟 getSelection() 检测
-          const checkIframeSelection = (evtType) => {
+          const checkIframeSelection = evtType => {
             log(`[iframe穿透] iframe[${idx}] 收到 ${evtType}`);
             setTimeout(() => {
               // 重新获取 selection（以防 document 引用过期）
               let currentDoc;
               try {
                 currentDoc = iframe.contentDocument;
-              } catch (_) { return; }
+              } catch (_) {
+                return;
+              }
               if (!currentDoc) return;
 
               const iframeSel = currentDoc.getSelection();
@@ -1837,7 +1903,9 @@ $(
                 !iframeSel.isCollapsed &&
                 iframeSel.toString().trim().length > 0;
 
-              log(`[iframe穿透] iframe[${idx}] 选区检查: hasText=${hasText}${hasText ? ', text="' + iframeSel.toString().substring(0, 30) + '"' : ''}`);
+              log(
+                `[iframe穿透] iframe[${idx}] 选区检查: hasText=${hasText}${hasText ? ', text="' + iframeSel.toString().substring(0, 30) + '"' : ''}`,
+              );
 
               const btn = parentDoc.getElementById(PENCIL_BUTTON_ID);
 
@@ -1878,7 +1946,7 @@ $(
                     btn.style.fontSize = `${Math.floor(pSize * 0.45)}px`;
 
                     const absTop = iframeRect.top + lastRect.bottom + 8;
-                    let absLeft = iframeRect.left + lastRect.right - (pSize / 2);
+                    let absLeft = iframeRect.left + lastRect.right - pSize / 2;
                     absLeft = Math.max(10, Math.min(absLeft, parentWin.innerWidth - pSize - 10));
 
                     btn.style.display = 'flex'; // 使用 flex 居中
@@ -1902,48 +1970,56 @@ $(
 
           // 兼容热重载：使用 on*** 直接覆盖旧版脚本的事件，避免内存和闭包泄漏
           // 打包伪事件（进行由于跨域或隔离导致的坐标修复）以直通父层的控制系统
-          const wrapEvent = (e) => {
-              const iframeRect = iframe.getBoundingClientRect();
-              const card = iframe.closest('.mes');
-              let cx = e.clientX, cy = e.clientY;
-              let touches = [], changedTouches = [];
-              if (e.touches && e.touches.length > 0) {
-                  cx = e.touches[0].clientX;
-                  cy = e.touches[0].clientY;
-                  touches = [{ clientX: cx + iframeRect.left, clientY: cy + iframeRect.top }];
-              }
-              if (e.changedTouches && e.changedTouches.length > 0) {
-                  changedTouches = [{ clientX: e.changedTouches[0].clientX + iframeRect.left, clientY: e.changedTouches[0].clientY + iframeRect.top }];
-              }
-              return {
-                  preventDefault: () => e.preventDefault?.(),
-                  stopPropagation: () => e.stopPropagation?.(),
-                  button: e.button,
-                  currentTarget: card,
-                  clientX: cx !== undefined ? cx + iframeRect.left : undefined,
-                  clientY: cy !== undefined ? cy + iframeRect.top : undefined,
-                  originalEvent: { touches, changedTouches }
-              };
+          const wrapEvent = e => {
+            const iframeRect = iframe.getBoundingClientRect();
+            const card = iframe.closest('.mes');
+            let cx = e.clientX,
+              cy = e.clientY;
+            let touches = [],
+              changedTouches = [];
+            if (e.touches && e.touches.length > 0) {
+              cx = e.touches[0].clientX;
+              cy = e.touches[0].clientY;
+              touches = [{ clientX: cx + iframeRect.left, clientY: cy + iframeRect.top }];
+            }
+            if (e.changedTouches && e.changedTouches.length > 0) {
+              changedTouches = [
+                {
+                  clientX: e.changedTouches[0].clientX + iframeRect.left,
+                  clientY: e.changedTouches[0].clientY + iframeRect.top,
+                },
+              ];
+            }
+            return {
+              preventDefault: () => e.preventDefault?.(),
+              stopPropagation: () => e.stopPropagation?.(),
+              button: e.button,
+              currentTarget: card,
+              clientX: cx !== undefined ? cx + iframeRect.left : undefined,
+              clientY: cy !== undefined ? cy + iframeRect.top : undefined,
+              originalEvent: { touches, changedTouches },
+            };
           };
 
-          iframeDoc.body.onmousedown = (e) => {
-              if (e.button === 2) { // 鼠标右键唤出
-                  e.preventDefault();
-                  lastTriggerWasTouch = false;
-                  const fe = wrapEvent(e);
-                  showMenu(fe.clientX, fe.clientY, fe.currentTarget);
-              }
+          iframeDoc.body.onmousedown = e => {
+            if (e.button === 2) {
+              // 鼠标右键唤出
+              e.preventDefault();
+              lastTriggerWasTouch = false;
+              const fe = wrapEvent(e);
+              showMenu(fe.clientX, fe.clientY, fe.currentTarget);
+            }
           };
-          iframeDoc.body.oncontextmenu = (e) => e.preventDefault();
-          iframeDoc.body.ondblclick = (e) => handleDoubleClick(wrapEvent(e));
-          iframeDoc.body.ontouchstart = (e) => handleTouchStart(wrapEvent(e));
-          iframeDoc.body.ontouchmove = (e) => handleTouchMove(wrapEvent(e));
+          iframeDoc.body.oncontextmenu = e => e.preventDefault();
+          iframeDoc.body.ondblclick = e => handleDoubleClick(wrapEvent(e));
+          iframeDoc.body.ontouchstart = e => handleTouchStart(wrapEvent(e));
+          iframeDoc.body.ontouchmove = e => handleTouchMove(wrapEvent(e));
 
-          iframeDoc.body.onmouseup = (e) => {
+          iframeDoc.body.onmouseup = e => {
             handleMouseUp(wrapEvent(e));
             checkIframeSelection('mouseup');
           };
-          iframeDoc.body.ontouchend = (e) => {
+          iframeDoc.body.ontouchend = e => {
             handleTouchEnd(wrapEvent(e));
             checkIframeSelection('touchend');
           };
@@ -1953,10 +2029,14 @@ $(
         if (iframe.contentDocument?.readyState === 'complete' && iframe.contentDocument?.body) {
           tryPatch();
         } else {
-          iframe.addEventListener('load', () => {
-            log(`[iframe穿透] iframe[${idx}] load 事件触发`);
-            tryPatch();
-          }, { once: true });
+          iframe.addEventListener(
+            'load',
+            () => {
+              log(`[iframe穿透] iframe[${idx}] load 事件触发`);
+              tryPatch();
+            },
+            { once: true },
+          );
           // 也加一个延迟兜底（有些 iframe load 不触发）
           setTimeout(tryPatch, 1000);
         }
@@ -2018,8 +2098,8 @@ $(
       }
     }
     function startEditing(forceCard, forceText) {
-      const { target, selectedText } = forceCard 
-        ? { target: $(forceCard), selectedText: forceText || '' } 
+      const { target, selectedText } = forceCard
+        ? { target: $(forceCard), selectedText: forceText || '' }
         : determineEditTarget();
       if (!target || target.length === 0) return;
       const sc = findScrollContainer();
@@ -2153,7 +2233,7 @@ $(
       }
 
       const tc = editor.tagName === 'TEXTAREA' ? editor.value : editor.textContent || '';
-      
+
       let si = -1;
       let ei = -1;
 
@@ -2634,7 +2714,7 @@ $(
     .k-radial-settings-footer button.k-radial-primary:hover {
         filter: brightness(1.2);
     }
-    .k-radial-settings-tabs {
+    .kconsadial-settings-tabs {
         display: flex; background: var(--black30a, rgba(0,0,0,0.2));
         border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.1));
     }
@@ -2698,7 +2778,10 @@ $(
         mobile: JSON.parse(JSON.stringify(currentSettings.profiles?.mobile || DEFAULT_PROFILE_MOBILE)),
       };
       let tempModeOverride = currentSettings.modeOverride || 'auto';
-      let currentTab = window.kRadialLastSettingsTab || (isMobileDevice() ? 'mobile' : 'pc');
+      let activeMode = isMobileDevice() ? 'mobile' : 'pc';
+      if (tempModeOverride === 'pc') activeMode = 'pc';
+      if (tempModeOverride === 'mobile') activeMode = 'mobile';
+      let currentTab = window.kRadialLastSettingsTab || activeMode;
 
       const overlay = parentDoc.createElement('div');
       overlay.id = 'k-radial-settings-overlay';
@@ -2799,9 +2882,22 @@ $(
       overlay.addEventListener('change', e => {
         if (e.target.id === 'k-radial-mode-override') {
           tempModeOverride = e.target.value;
+          if (tempModeOverride === 'pc') {
+            currentTab = 'pc';
+          } else if (tempModeOverride === 'mobile') {
+            currentTab = 'mobile';
+          } else {
+            currentTab = isMobileDevice() ? 'mobile' : 'pc';
+          }
+          window.kRadialLastSettingsTab = currentTab;
+          renderContent();
         }
         if (e.target.id === 'k-radial-toolbar-toggle') {
           tempProfiles[currentTab].toolbarMode = e.target.checked;
+          renderContent();
+        }
+        if (e.target.id === 'k-radial-prevent-dblclick') {
+          tempProfiles[currentTab].preventDoubleTapDefault = e.target.checked;
           renderContent();
         }
         if (e.target.id === 'k-radial-mobile-trigger') {
@@ -2863,6 +2959,14 @@ $(
                         <input type="checkbox" id="k-radial-toolbar-toggle" ${p.toolbarMode ? 'checked' : ''} style="opacity:0;width:0;height:0;">
                         <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:${p.toolbarMode ? 'var(--SmartThemeQuoteColor,#4caf8a)' : 'rgba(255,255,255,0.15)'};border-radius:22px;transition:background .2s;"></span>
                         <span style="position:absolute;top:2px;left:${p.toolbarMode ? '22px' : '2px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></span>
+                    </label>
+                </div>
+                <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; ${p.toolbarMode || p.mobileTriggerMode !== 'doubleTap' ? 'opacity:0.4;pointer-events:none;' : ''}">
+                    <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;" title="针对极简浏览器双击失效/冲突现象的兼容开关">拦截系统默认双击事件</div>
+                    <label style="position:relative;display:inline-block;width:42px;height:22px;cursor:pointer;">
+                        <input type="checkbox" id="k-radial-prevent-dblclick" ${p.preventDoubleTapDefault ? 'checked' : ''} style="opacity:0;width:0;height:0;" ${p.toolbarMode || p.mobileTriggerMode !== 'doubleTap' ? 'disabled' : ''}>
+                        <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:${p.preventDoubleTapDefault ? 'var(--SmartThemeQuoteColor,#4caf8a)' : 'rgba(255,255,255,0.15)'};border-radius:22px;transition:background .2s;"></span>
+                        <span style="position:absolute;top:2px;left:${p.preventDoubleTapDefault ? '22px' : '2px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></span>
                     </label>
                 </div>
                 <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center;">
@@ -3000,6 +3104,7 @@ $(
             const fakeBtn = parentDoc.createElement('div');
             fakeBtn.className = TOOLBAR_BTN_CLASS;
             fakeBtn.innerHTML = `<i class="fa-solid ${btn.icon}"></i>`;
+            fakeBtn.style.setProperty('border-radius', '50%', 'important');
             fakeBtn.title = btn.tooltip;
             toolbar.appendChild(fakeBtn);
           });
@@ -3018,6 +3123,7 @@ $(
             fakeBtn.className = BUTTON_CLASS;
             fakeBtn.innerHTML = `<i class="fa-solid ${btn.icon}"></i>`;
             fakeBtn.style.setProperty('position', 'absolute', 'important');
+            fakeBtn.style.setProperty('border-radius', '50%', 'important');
             fakeBtn.style.left = `calc(50% + ${dx}px)`;
             fakeBtn.style.top = `calc(50% + ${dy}px)`;
             container.appendChild(fakeBtn);
@@ -3243,6 +3349,7 @@ $(
           now - lastTapTime < 350 &&
           Math.hypot(touch.clientX - lastTapCoords.x, touch.clientY - lastTapCoords.y) < 30
         ) {
+          if (eff.preventDoubleTapDefault) e.preventDefault?.();
           lastTriggerWasTouch = true;
           showMenu(touch.clientX, touch.clientY, card);
           lastTapTime = 0;
@@ -3402,7 +3509,7 @@ $(
       // MutationObserver：当 #chat 内有新节点（含 iframe）出现时自动扫描
       try {
         if (chatEl) {
-          const iframeObserver = new MutationObserver((mutations) => {
+          const iframeObserver = new MutationObserver(mutations => {
             let hasNewIframe = false;
             for (const m of mutations) {
               for (const node of m.addedNodes) {
@@ -3423,7 +3530,7 @@ $(
           iframeObserver.observe(chatEl, { childList: true, subtree: true });
           log('[iframe穿透] MutationObserver 已挂载到 #chat');
         }
-      } catch(e) {
+      } catch (e) {
         log('[iframe穿透] MutationObserver 挂载失败: ' + e.message);
       }
 
