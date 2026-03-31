@@ -20,7 +20,7 @@ $(
     }
 
     // ── 设置版本号，用于未来迁移 ──
-    const SETTINGS_VERSION = 2;
+    const SETTINGS_VERSION = 3;
     const SETTINGS_STORAGE_KEY = 'k-radial-menu-settings';
     const BOOKMARKS_CHAT_KEY = 'radial_swipe_bookmarks';
 
@@ -59,7 +59,9 @@ $(
       toolbarMode: true,
       toolbarCollapsed: false,
       toolbarPosition: { x: 20, y: 100 },
-      mobileTriggerMode: 'longPress',
+      mobileTriggerMode: 'doubleTap',
+      triggerTimeout: 500,
+      enableQRButton: false,
       preventDoubleTapDefault: false,
     };
 
@@ -72,6 +74,8 @@ $(
       toolbarCollapsed: false,
       toolbarPosition: { x: 20, y: 100 },
       mobileTriggerMode: 'longPress',
+      triggerTimeout: 500,
+      enableQRButton: false,
       preventDoubleTapDefault: false,
     };
 
@@ -82,7 +86,13 @@ $(
         // 优先尝试脚本变量
         if (typeof getVariables === 'function') {
           const vars = getVariables({ type: 'script' });
-          if (vars) parsed = vars;
+          // getVariables 返回的可能是被包裹的 Proxy（MVU/Vue响应式对象），Object.keys(vars) 可能会判定为空
+          // 因此直接通过读取内部真实存在的 key（如 _version 或是从不为空的对象本身）来进行确认
+          if (vars && (vars._version || vars.profiles || Object.keys(vars).length > 0)) {
+            parsed = vars;
+          } else if (vars && Object.keys(vars).length === 0 && !vars._version) {
+            // 如果确实是个什么都没存的空壳，则不使用它，留给后面的 localStorage 跟默认值
+          }
         }
       } catch (e) {
         console.warn('[RadialMenu] loadSettings from script vars failed:', e);
@@ -107,13 +117,7 @@ $(
         };
       }
 
-      // Exact match for V2
-      if (parsed._version === SETTINGS_VERSION && parsed.profiles) {
-        if (typeof parsed.modeOverride === 'undefined') parsed.modeOverride = 'auto';
-        return parsed;
-      }
-
-      // Migration from V1 (or broken structures)
+      // 从 V1 迁移或损坏结构修复：转化为基础的 V2 格式
       if (parsed._version === 1 || !parsed.profiles) {
         const legacyProfile = {
           enabledButtons: parsed.enabledButtons || [...DEFAULT_ENABLED_BUTTONS],
@@ -126,8 +130,8 @@ $(
           mobileTriggerMode: 'longPress',
           preventDoubleTapDefault: !!parsed.preventDoubleTapDefault,
         };
-        return {
-          _version: SETTINGS_VERSION,
+        parsed = {
+          _version: 2,
           modeOverride: 'auto',
           profiles: {
             pc: JSON.parse(JSON.stringify(legacyProfile)),
@@ -136,15 +140,45 @@ $(
         };
       }
 
+      // 通用迁移逻辑 (V2 -> V3, 以及未来版本的字段补齐)
+      if (parsed._version < SETTINGS_VERSION) {
+         const defs = { pc: DEFAULT_PROFILE_PC, mobile: DEFAULT_PROFILE_MOBILE };
+         for (const env of ['pc', 'mobile']) {
+            if (!parsed.profiles[env]) parsed.profiles[env] = {};
+            for (const key in defs[env]) {
+                if (typeof parsed.profiles[env][key] === 'undefined') {
+                    // 用户旧版档案中缺少的字段，用默认设置补上
+                    if (Array.isArray(defs[env][key])) {
+                        parsed.profiles[env][key] = [...defs[env][key]];
+                    } else if (typeof defs[env][key] === 'object' && defs[env][key] !== null) {
+                        parsed.profiles[env][key] = JSON.parse(JSON.stringify(defs[env][key]));
+                    } else {
+                        parsed.profiles[env][key] = defs[env][key];
+                    }
+                }
+            }
+         }
+         if (typeof parsed.modeOverride === 'undefined') parsed.modeOverride = 'auto';
+         parsed._version = SETTINGS_VERSION;
+         
+         // 迁移完成后执行一次保存，覆盖旧版结构，更新至最新版本代号
+         saveSettings(parsed);
+      }
+
       return parsed;
     }
 
     function saveSettings(settings) {
       settings._version = SETTINGS_VERSION;
-      // 保存到脚本变量
+      const data = JSON.parse(JSON.stringify(settings));
+      // 保存到脚本变量 — 优先使用 updateVariablesWith 直接返回全新对象覆写，规避合并残留和响应式丢失
       try {
-        if (typeof replaceVariables === 'function') {
-          replaceVariables(JSON.parse(JSON.stringify(settings)), { type: 'script' });
+        if (typeof updateVariablesWith === 'function') {
+          updateVariablesWith(() => data, { type: 'script' });
+        } else if (typeof replaceVariables === 'function') {
+          replaceVariables(data, { type: 'script' });
+        } else if (typeof insertOrAssignVariables === 'function') {
+          insertOrAssignVariables(data, { type: 'script' });
         }
       } catch (e) {
         console.warn('[RadialMenu] saveSettings to script vars failed:', e);
@@ -309,8 +343,8 @@ $(
         MESSAGE: '.mes',
         EDIT_BUTTONS: ['.mes_edit', '.fa-edit', '.fa-pencil'],
         DONE_BUTTON: '.mes_edit_done',
-        EDITOR: 'textarea:visible, [contenteditable="true"]:visible',
-        ST_EDITOR_TEXTAREA: '#curEditTextarea, textarea.edit_textarea, .mes_text textarea',
+        EDITOR: 'textarea:not(.reasoning_edit_textarea):visible, [contenteditable="true"]:visible',
+        ST_EDITOR_TEXTAREA: '#curEditTextarea, textarea.edit_textarea, .mes_text textarea:not(.reasoning_edit_textarea)',
         SCROLL_CONTAINERS: ['.simplebar-content-wrapper', '#chat', '.chat-area', '#chat_container'],
       },
       ATTRIBUTES: { TEMP_TARGET: 'data-k-radial-edit-target' },
@@ -1857,7 +1891,8 @@ $(
       const parentWin = window.parent;
       const iframes = parentDoc.querySelectorAll('.mes_text iframe');
 
-      log(`[iframe穿透] 扫描到 ${iframes.length} 个 .mes_text iframe`);
+      // 移除高频扫描日志，避免性能浪费与控制台刷屏
+      // log(`[iframe穿透] 扫描到 ${iframes.length} 个 .mes_text iframe`);
 
       iframes.forEach((iframe, idx) => {
         const tryPatch = () => {
@@ -1865,11 +1900,11 @@ $(
           try {
             iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
           } catch (e) {
-            log(`[iframe穿透] iframe[${idx}] 跨域，跳过: ${e.message}`);
+            // log(`[iframe穿透] iframe[${idx}] 跨域，跳过: ${e.message}`);
             return;
           }
           if (!iframeDoc?.body) {
-            log(`[iframe穿透] iframe[${idx}] body 不存在，跳过`);
+            // log(`[iframe穿透] iframe[${idx}] body 不存在，跳过`);
             return;
           }
           // 已经 patch 过这个 document 的 body → 跳过
@@ -1880,12 +1915,12 @@ $(
 
           const mesEl = iframe.closest('[mesid]');
           const mesid = mesEl?.getAttribute('mesid');
-          log(`[iframe穿透] ✅ patch iframe[${idx}], mesid=${mesid}, body children=${iframeDoc.body.children.length}`);
+          log(`[iframe穿透] ✅ 成功拦截 iframe 内部事件流, mesid=${mesid}`);
 
           // 关键修复：srcdoc iframe 的 document 级 selectionchange 不触发！
           // 改用 body 级 mouseup/touchend + 延迟 getSelection() 检测
           const checkIframeSelection = evtType => {
-            log(`[iframe穿透] iframe[${idx}] 收到 ${evtType}`);
+            // log(`[iframe穿透] iframe[${idx}] 收到 ${evtType}`);
             setTimeout(() => {
               // 重新获取 selection（以防 document 引用过期）
               let currentDoc;
@@ -1903,9 +1938,9 @@ $(
                 !iframeSel.isCollapsed &&
                 iframeSel.toString().trim().length > 0;
 
-              log(
-                `[iframe穿透] iframe[${idx}] 选区检查: hasText=${hasText}${hasText ? ', text="' + iframeSel.toString().substring(0, 30) + '"' : ''}`,
-              );
+              // log(
+              //   `[iframe穿透] iframe[${idx}] 选区检查: hasText=${hasText}${hasText ? ', text="' + iframeSel.toString().substring(0, 30) + '"' : ''}`,
+              // );
 
               const btn = parentDoc.getElementById(PENCIL_BUTTON_ID);
 
@@ -2169,9 +2204,13 @@ $(
       };
 
       const onReady = ed => {
-        // 1. Scroll the parent (#chat) so the message card's editor area is
-        //    visible — use a small top offset so the user sees the card header.
-        scrollToElement(ed, EDIT_CONFIG.SCROLL_INTO_VIEW_OFFSET);
+        // 1. 动态滚动：如果存在思维链，基于整条消息卡片定位以保证上方视野；否则基于输入框定位
+        const $reasoning = $(ed).parent().find('.reasoning_edit_textarea');
+        if ($reasoning.length && $reasoning.is(':visible')) {
+          scrollToElement($(ed).closest('.mes')[0], EDIT_CONFIG.SCROLL_INTO_VIEW_OFFSET);
+        } else {
+          scrollToElement(ed, EDIT_CONFIG.SCROLL_INTO_VIEW_OFFSET);
+        }
 
         // --- NEW: Universal Scroll Restoration on Editor Close ---
         if (previousScrollPosition !== null) {
@@ -2254,16 +2293,56 @@ $(
         }
       }
 
-      // 3. 最后降级：忽略所有首尾空格与格式符号的模糊搜寻 (应对极少量的 DOM 扭曲)
+      // 3. 最后降级：碎片锚地扫描法 (Fragment Anchoring) - 专治跨域 Markdown 污染与排版截断
       if (si === -1) {
-        const stripped = text.trim().replace(/[*_~`]/g, '');
-        if (stripped) {
-          const pattern = stripped.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-          const m = tc.match(new RegExp(pattern, 'i'));
-          if (m && m.index !== undefined) {
-            si = m.index;
-            ei = si + m[0].length;
-          }
+        let foundSi = -1;
+        let foundEi = -1;
+        
+        // 分离出具有实际匹配价值的核心片段（按换行符切断）
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length >= 4);
+        if (lines.length > 0) {
+            // 前向寻找最早匹配到的行或最少 10 字符碎块
+            outerStart: for (const line of lines) {
+                let match = tc.indexOf(line);
+                if (match !== -1) { foundSi = match; break outerStart; }
+                for (let k = 0; k <= line.length - 8; k += 4) {
+                   const piece = line.substr(k, 10);
+                   match = tc.indexOf(piece);
+                   if (match !== -1) { foundSi = match; break outerStart; }
+                }
+            }
+            
+            // 后向寻找最晚匹配到的行或最少 10 字符碎块
+            outerEnd: for (let i = lines.length - 1; i >= 0; i--) {
+                const line = lines[i];
+                let match = tc.lastIndexOf(line);
+                if (match !== -1) { foundEi = match + line.length; break outerEnd; }
+                for (let k = line.length; k >= 8; k -= 4) {
+                   const piece = line.substr(Math.max(0, k - 10), Math.min(10, k));
+                   match = tc.lastIndexOf(piece);
+                   if (match !== -1) { foundEi = match + piece.length; break outerEnd; }
+                }
+            }
+        }
+
+        if (foundSi !== -1 || foundEi !== -1) {
+            // 如果找到至少一头，则按照纯文本长度粗略推算另一头
+            si = foundSi !== -1 ? foundSi : Math.max(0, foundEi - text.length);
+            ei = foundEi !== -1 ? foundEi : Math.min(tc.length, foundSi + text.length);
+            if (si > ei) { let t = si; si = ei; ei = t; }
+        } else {
+            // 极度降级：连 10 字符的碎片都被 Markdown 切断了，退一步进行 4 字符“显微镜”地毯搜索
+            // 哪怕只高亮原码里的这 4 个字符，也比直接罢工报错强
+            for (let i = 0; i <= text.length - 4; i += 2) {
+                const piece = text.substr(i, 4);
+                if (!piece.trim()) continue;
+                const match = tc.indexOf(piece);
+                if (match !== -1) {
+                    si = match;
+                    ei = match + piece.length;
+                    break;
+                }
+            }
         }
       }
 
@@ -2842,12 +2921,14 @@ $(
             if (chatEl) {
               $(chatEl)
                 .off('.radialMenu')
-                .on('dblclick.radialMenu', '.mes', handleDoubleClick)
+                .on('click.radialMenu', '.mes', handleMultiClick)
                 .on('touchstart.radialMenu', '.mes', handleTouchStart)
                 .on('touchend.radialMenu touchcancel.radialMenu', '.mes', handleTouchEnd);
             }
           }
         }
+
+        if (typeof window.kRadialUpdateQR === 'function') window.kRadialUpdateQR();
 
         toastr.success('轮盘设置已保存');
         closeSettings();
@@ -2900,6 +2981,10 @@ $(
           tempProfiles[currentTab].preventDoubleTapDefault = e.target.checked;
           renderContent();
         }
+        if (e.target.id === 'k-radial-qr-toggle') {
+          tempProfiles[currentTab].enableQRButton = e.target.checked;
+          renderContent();
+        }
         if (e.target.id === 'k-radial-mobile-trigger') {
           tempProfiles[currentTab].mobileTriggerMode = e.target.value;
           renderContent();
@@ -2907,6 +2992,9 @@ $(
       });
 
       overlay.addEventListener('input', e => {
+        if (e.target.id === 'k-radial-timeout-input') {
+          tempProfiles[currentTab].triggerTimeout = parseInt(e.target.value, 10) || 500;
+        }
         if (e.target.id === 'k-radial-size-slider') {
           tempProfiles[currentTab].buttonSize = parseInt(e.target.value, 10);
           const valSpan = overlay.querySelector('#k-radial-size-val');
@@ -2947,11 +3035,23 @@ $(
                     </select>
                 </div>
                 <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; ${p.toolbarMode ? 'opacity:0.4;pointer-events:none;' : ''}">
-                    <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;">移动端轮盘唤出方式</div>
-                    <select id="k-radial-mobile-trigger" style="background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:4px; padding:4px 8px; outline:none; font-size:0.9em; cursor:pointer;" ${p.toolbarMode ? 'disabled title="固定工具栏模式下不适用"' : ''}>
-                        <option value="longPress" ${p.mobileTriggerMode !== 'doubleTap' ? 'selected' : ''}>长按 (450ms)</option>
-                        <option value="doubleTap" ${p.mobileTriggerMode === 'doubleTap' ? 'selected' : ''}>双击</option>
-                    </select>
+                    <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;">轮盘唤出方式</div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <input type="number" id="k-radial-timeout-input" value="${p.triggerTimeout || 500}" min="100" max="2000" style="width:60px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:4px; padding:4px; outline:none; font-size:0.9em; text-align:center;" title="判定延迟/超时毫秒" ${p.toolbarMode ? 'disabled' : ''}>
+                        <select id="k-radial-mobile-trigger" style="background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.2); color:#fff; border-radius:4px; padding:4px 8px; outline:none; font-size:0.9em; cursor:pointer;" ${p.toolbarMode ? 'disabled' : ''}>
+                            <option value="longPress" ${p.mobileTriggerMode === 'longPress' || (!p.mobileTriggerMode && p.mobileTriggerMode !== 'doubleTap') ? 'selected' : ''}>长按</option>
+                            <option value="doubleTap" ${p.mobileTriggerMode === 'doubleTap' ? 'selected' : ''}>双击</option>
+                            <option value="tripleTap" ${p.mobileTriggerMode === 'tripleTap' ? 'selected' : ''}>三击</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;">启用 QR 按钮召唤</div>
+                    <label style="position:relative;display:inline-block;width:42px;height:22px;cursor:pointer;">
+                        <input type="checkbox" id="k-radial-qr-toggle" ${p.enableQRButton ? 'checked' : ''} style="opacity:0;width:0;height:0;">
+                        <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:${p.enableQRButton ? 'var(--SmartThemeQuoteColor,#4caf8a)' : 'rgba(255,255,255,0.15)'};border-radius:22px;transition:background .2s;"></span>
+                        <span style="position:absolute;top:2px;left:${p.enableQRButton ? '22px' : '2px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></span>
+                    </label>
                 </div>
                 <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                     <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;">固定长条工具栏模式</div>
@@ -3124,6 +3224,10 @@ $(
             fakeBtn.innerHTML = `<i class="fa-solid ${btn.icon}"></i>`;
             fakeBtn.style.setProperty('position', 'absolute', 'important');
             fakeBtn.style.setProperty('border-radius', '50%', 'important');
+            fakeBtn.style.setProperty('background', 'var(--rb-bg)', 'important');
+            fakeBtn.style.setProperty('border', '1.5px solid var(--rb-border)', 'important');
+            fakeBtn.style.setProperty('color', 'var(--rb-text)', 'important');
+            fakeBtn.style.setProperty('box-shadow', '0 4px 18px var(--rb-shadow)', 'important');
             fakeBtn.style.left = `calc(50% + ${dx}px)`;
             fakeBtn.style.top = `calc(50% + ${dy}px)`;
             container.appendChild(fakeBtn);
@@ -3151,39 +3255,41 @@ $(
       parentDoc.body.appendChild(overlay);
     }
 
-    // ── 在扩展设置面板挂载设置入口（使用 ST_API）──────────────────────────────
+    // ── 在扩展设置面板挂载设置入口（脱离 API 依赖）──────────────────────────────
     async function mountSettingsEntry() {
-      const ST_API = window.parent?.ST_API || window.ST_API;
-      if (!ST_API?.ui?.registerSettingsPanel) {
-        console.warn('[RadialMenu] ST_API.ui.registerSettingsPanel 不可用');
+      if (window.parent.kRadialSettingsRegistered) return; // 防止重复注册
+      const parentDoc = window.parent.document;
+
+      // 寻找扩展面板容器
+      const $extensionsSettings = $('#extensions_settings2', parentDoc).length 
+          ? $('#extensions_settings2', parentDoc) 
+          : $('#extensions_settings', parentDoc);
+
+      if ($extensionsSettings.length === 0) {
+        console.warn('[RadialMenu] 找不到扩展设置容器');
         return;
       }
-      if (window.parent.kRadialSettingsRegistered) return; // 防止热重载/开关脚本时重复注册
-      try {
-        await ST_API.ui.registerSettingsPanel({
-          id: 'k-radial-menu.settings',
-          title: '轮盘快捷菜单',
-          target: 'right',
-          content: {
-            kind: 'render',
-            render: container => {
-              const btn = document.createElement('button');
-              btn.className = 'menu_button';
-              btn.style.cssText = 'width:100%;padding:6px 12px;font-size:0.9em;';
-              btn.innerHTML = '<i class="fa-solid fa-compass" style="margin-right:6px;"></i>打开轮盘按钮设置';
-              btn.addEventListener('click', e => {
-                e.stopPropagation();
-                showSettingsPopup();
-              });
-              container.appendChild(btn);
-            },
-          },
-        });
-        log('设置面板已通过 ST_API 注册');
-        window.parent.kRadialSettingsRegistered = true;
-      } catch (e) {
-        console.warn('[RadialMenu] registerSettingsPanel failed:', e);
-      }
+
+      // 创建折叠面板结构 (兼容 ST inline-drawer)
+      const $drawer = $('<div class="inline-drawer"></div>');
+      const $toggle = $('<div class="inline-drawer-toggle inline-drawer-header"><b>轮盘快捷菜单</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button"></div></div>');
+      const $content = $('<div class="inline-drawer-content" style="display: none; padding-top: 5px; padding-bottom: 10px;"></div>');
+
+      const btn = parentDoc.createElement('button');
+      btn.className = 'menu_button';
+      btn.style.cssText = 'width:100%;padding:6px 12px;font-size:0.9em;';
+      btn.innerHTML = '<i class="fa-solid fa-compass" style="margin-right:6px;"></i>打开轮盘按钮设置';
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        showSettingsPopup();
+      });
+
+      $content.append(btn);
+      $drawer.append($toggle).append($content);
+      $extensionsSettings.append($drawer);
+
+      log('设置面板已直接挂载（无 API 依赖）');
+      window.parent.kRadialSettingsRegistered = true;
     }
 
     // ── Mouse handlers (PC) ─────────────────────────────────────────────────
@@ -3194,12 +3300,39 @@ $(
     let lastTapTime = 0;
     let lastTapCoords = { x: 0, y: 0 };
     let lastTapCard = null;
-    function handleDoubleClick(e) {
-      if (Date.now() - lastTouchEndTime < 600) return; // came from a double-tap, ignore
-      e.preventDefault();
-      lastTriggerWasTouch = false;
-      pressCoords = { x: e.clientX, y: e.clientY };
-      showMenu(e.clientX, e.clientY, e.currentTarget);
+
+    let pcClickCount = 0;
+    let pcClickTimer = null;
+    function handleMultiClick(e) {
+      if (lastTriggerWasTouch) return;
+      const eff = getEffectiveSettings();
+      const triggerMode = eff.mobileTriggerMode || 'longPress';
+      const timeout = eff.triggerTimeout || 500;
+      
+      pcClickCount++;
+      if (pcClickCount === 1) {
+        pcClickTimer = setTimeout(() => {
+          pcClickCount = 0;
+        }, timeout);
+      }
+
+      let targetCount = -1;
+      if (triggerMode === 'doubleTap') targetCount = 2;
+      if (triggerMode === 'tripleTap') targetCount = 3;
+      if (targetCount === -1) targetCount = 2; // 如果是长按等非点击类型，PC 降级兜底为双击
+
+      // 避免连击事件在选中文本时依然触发轮盘
+      if (window.parent.getSelection().toString().length > 0) return;
+
+      if (pcClickCount >= targetCount) {
+        clearTimeout(pcClickTimer);
+        pcClickCount = 0;
+        if (Date.now() - lastTouchEndTime < 600) return; // 忽略移动端双击残留的合成鼠标事件
+        e.preventDefault();
+        lastTriggerWasTouch = false;
+        pressCoords = { x: e.clientX, y: e.clientY };
+        showMenu(e.clientX, e.clientY, e.currentTarget);
+      }
     }
     function handleMouseUp(e) {
       if (Date.now() - lastTouchEndTime < 600) return; // Prevent synthetic mouse events from dismissing menu on mobile
@@ -3282,19 +3415,20 @@ $(
       }
 
       const eff = getEffectiveSettings();
-      if (eff.mobileTriggerMode === 'doubleTap') {
+      if (eff.mobileTriggerMode === 'doubleTap' || eff.mobileTriggerMode === 'tripleTap') {
         isPossiblyLongPress = false;
         return;
       }
 
       isPossiblyLongPress = true;
       const card = e.currentTarget;
+      const timeout = eff.triggerTimeout || 500;
       touchTimer = setTimeout(() => {
         if (isPossiblyLongPress) {
           lastTriggerWasTouch = true;
           showMenu(pressCoords.x, pressCoords.y, card);
         }
-      }, LONG_PRESS_DURATION);
+      }, timeout);
     }
     function handleTouchMove(e) {
       if (!menuVisible) {
@@ -3336,7 +3470,8 @@ $(
       }
 
       const eff = getEffectiveSettings();
-      if (eff.mobileTriggerMode === 'doubleTap') {
+      const isMultiTap = (eff.mobileTriggerMode === 'doubleTap' || eff.mobileTriggerMode === 'tripleTap');
+      if (isMultiTap) {
         const touch = e.originalEvent.changedTouches
           ? e.originalEvent.changedTouches[0]
           : e.originalEvent.touches
@@ -3344,16 +3479,26 @@ $(
             : pressCoords;
         const now = Date.now();
         const card = e.currentTarget;
+        const timeout = eff.triggerTimeout || 500;
+        const targetTaps = eff.mobileTriggerMode === 'tripleTap' ? 3 : 2;
+
         if (
           lastTapCard === card &&
-          now - lastTapTime < 350 &&
+          now - lastTapTime < timeout &&
           Math.hypot(touch.clientX - lastTapCoords.x, touch.clientY - lastTapCoords.y) < 30
         ) {
+          window.kRadialMobileTapCount = (window.kRadialMobileTapCount || 1) + 1;
+        } else {
+          window.kRadialMobileTapCount = 1;
+        }
+
+        if (window.kRadialMobileTapCount >= targetTaps) {
           if (eff.preventDoubleTapDefault) e.preventDefault?.();
           lastTriggerWasTouch = true;
           showMenu(touch.clientX, touch.clientY, card);
           lastTapTime = 0;
           lastTapCard = null;
+          window.kRadialMobileTapCount = 0;
         } else {
           lastTapTime = now;
           lastTapCoords = { x: touch.clientX, y: Math.max(0, touch.clientY) };
@@ -3541,7 +3686,7 @@ $(
         } else {
           $chat
             .off('.radialMenu')
-            .on('dblclick.radialMenu', '.mes', handleDoubleClick)
+            .on('click.radialMenu', '.mes', handleMultiClick)
             .on('touchstart.radialMenu', '.mes', handleTouchStart)
             .on('touchend.radialMenu touchcancel.radialMenu', '.mes', handleTouchEnd);
         }
@@ -3591,6 +3736,33 @@ $(
           safeEventOn('MESSAGE_RECEIVED', () => setTimeout(obs, 300));
           safeEventOn('MESSAGE_DELETED', () => setTimeout(obs, 300));
         }
+
+        // ── QR 按钮集成 ──
+        window.kRadialUpdateQR = function () {
+          const eff = getEffectiveSettings();
+          if (typeof replaceScriptButtons === 'function') {
+            if (eff.enableQRButton) {
+              replaceScriptButtons([{ name: '🧭 轮盘', visible: true }]);
+              // getButtonEvent 返回的是完整事件名（不是 tavern_events 的 key），必须用 eventOn 直接绑定
+              if (!window.kRadialQRBound && typeof eventOn === 'function' && typeof getButtonEvent === 'function') {
+                const evName = getButtonEvent('🧭 轮盘');
+                eventOn(evName, () => {
+                  const parentWin = window.parent;
+                  const cx = parentWin.innerWidth / 2;
+                  const cy = parentWin.innerHeight / 2;
+                  const targetCard = mostVisibleMessageCard || $(parentWin.document).find('.mes:last')[0];
+                  showMenu(cx, cy, targetCard);
+                });
+                window.kRadialQRBound = true;
+              }
+            } else {
+              // 开关被禁用时清理掉可能遗留的按钮
+              replaceScriptButtons([]);
+            }
+          }
+        };
+        window.kRadialUpdateQR();
+
         log('双端事件绑定成功。');
       } else {
         console.warn('[PC_RadialMenu_v2] 未找到 #chat 元素');
