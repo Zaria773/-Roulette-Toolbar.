@@ -160,7 +160,7 @@ $(
          }
          if (typeof parsed.modeOverride === 'undefined') parsed.modeOverride = 'auto';
          parsed._version = SETTINGS_VERSION;
-         
+
          // 迁移完成后执行一次保存，覆盖旧版结构，更新至最新版本代号
          saveSettings(parsed);
       }
@@ -463,7 +463,7 @@ $(
         'beforeend',
         `<style id="${STYLE_ID}">
     #${MENU_CONTAINER_ID} { display: none; }
-    
+
     /* ── 强行剥离浏览器原生的双击延迟判定，确保移动端双击丝滑 ── */
     .mes { touch-action: manipulation !important; }
 
@@ -1374,7 +1374,7 @@ $(
       const T = targetFinger;
       // 取消 150 字符的区域限制，直接在全量数据中暴力滑窗。
       // 因为现代 JS 引擎即便对 10000 字符文本进行滑窗运算，耗时也仅需 10-30 毫秒。
-      // 彻底破除区域限制后，能完美抵抗由巨量前置 DOM 节点（如大量被翻译的文本/隐形代码库）导致的极端坐标轴偏移。
+      // 破除区域限制后，能完美抵抗由巨量前置 DOM 节点（如大量被翻译的文本/隐形代码库）导致的极端坐标轴偏移。
       const searchSpace = rawFinger;
 
       let bestScore = -1;
@@ -2037,6 +2037,7 @@ $(
           };
 
           iframeDoc.body.onmousedown = e => {
+            if (getEffectiveSettings().toolbarMode) return;
             if (e.button === 2) {
               // 鼠标右键唤出
               e.preventDefault();
@@ -2045,17 +2046,30 @@ $(
               showMenu(fe.clientX, fe.clientY, fe.currentTarget);
             }
           };
-          iframeDoc.body.oncontextmenu = e => e.preventDefault();
-          iframeDoc.body.ondblclick = e => handleDoubleClick(wrapEvent(e));
-          iframeDoc.body.ontouchstart = e => handleTouchStart(wrapEvent(e));
+          iframeDoc.body.oncontextmenu = e => {
+            if (!getEffectiveSettings().toolbarMode) e.preventDefault();
+          };
+          iframeDoc.body.onclick = e => {
+            if (!getEffectiveSettings().toolbarMode && typeof handleMultiClick === 'function') {
+              handleMultiClick(wrapEvent(e));
+            }
+          };
+          iframeDoc.body.ondblclick = e => {
+            if (!getEffectiveSettings().toolbarMode && typeof handleDoubleClick === 'function') {
+              handleDoubleClick(wrapEvent(e));
+            }
+          };
+          iframeDoc.body.ontouchstart = e => {
+            if (!getEffectiveSettings().toolbarMode) handleTouchStart(wrapEvent(e));
+          };
           iframeDoc.body.ontouchmove = e => handleTouchMove(wrapEvent(e));
 
           iframeDoc.body.onmouseup = e => {
-            handleMouseUp(wrapEvent(e));
+            if (!getEffectiveSettings().toolbarMode) handleMouseUp(wrapEvent(e));
             checkIframeSelection('mouseup');
           };
           iframeDoc.body.ontouchend = e => {
-            handleTouchEnd(wrapEvent(e));
+            if (!getEffectiveSettings().toolbarMode) handleTouchEnd(wrapEvent(e));
             checkIframeSelection('touchend');
           };
         };
@@ -2297,7 +2311,7 @@ $(
       if (si === -1) {
         let foundSi = -1;
         let foundEi = -1;
-        
+
         // 分离出具有实际匹配价值的核心片段（按换行符切断）
         const lines = text.split('\n').map(l => l.trim()).filter(l => l.length >= 4);
         if (lines.length > 0) {
@@ -2311,7 +2325,7 @@ $(
                    if (match !== -1) { foundSi = match; break outerStart; }
                 }
             }
-            
+
             // 后向寻找最晚匹配到的行或最少 10 字符碎块
             outerEnd: for (let i = lines.length - 1; i >= 0; i--) {
                 const line = lines[i];
@@ -2331,7 +2345,7 @@ $(
             ei = foundEi !== -1 ? foundEi : Math.min(tc.length, foundSi + text.length);
             if (si > ei) { let t = si; si = ei; ei = t; }
         } else {
-            // 极度降级：连 10 字符的碎片都被 Markdown 切断了，退一步进行 4 字符“显微镜”地毯搜索
+            // 降级：连 10 字符的碎片都被 Markdown 切断了，退一步进行 4 字符“显微镜”地毯搜索
             // 哪怕只高亮原码里的这 4 个字符，也比直接罢工报错强
             for (let i = 0; i <= text.length - 4; i += 2) {
                 const piece = text.substr(i, 4);
@@ -3261,8 +3275,8 @@ $(
       const parentDoc = window.parent.document;
 
       // 寻找扩展面板容器
-      const $extensionsSettings = $('#extensions_settings2', parentDoc).length 
-          ? $('#extensions_settings2', parentDoc) 
+      const $extensionsSettings = $('#extensions_settings2', parentDoc).length
+          ? $('#extensions_settings2', parentDoc)
           : $('#extensions_settings', parentDoc);
 
       if ($extensionsSettings.length === 0) {
@@ -3308,7 +3322,7 @@ $(
       const eff = getEffectiveSettings();
       const triggerMode = eff.mobileTriggerMode || 'longPress';
       const timeout = eff.triggerTimeout || 500;
-      
+
       pcClickCount++;
       if (pcClickCount === 1) {
         pcClickTimer = setTimeout(() => {
