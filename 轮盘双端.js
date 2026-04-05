@@ -20,7 +20,7 @@ $(
     }
 
     // ── 设置版本号，用于未来迁移 ──
-    const SETTINGS_VERSION = 3;
+    const SETTINGS_VERSION = 4;
     const SETTINGS_STORAGE_KEY = 'k-radial-menu-settings';
     const BOOKMARKS_CHAT_KEY = 'radial_swipe_bookmarks';
 
@@ -79,6 +79,10 @@ $(
       preventDoubleTapDefault: false,
     };
 
+    function getLegacyAutoJumpEnabled() {
+      return localStorage.getItem('k-pc-radial-auto-jump') !== 'false';
+    }
+
     // ── 设置持久化 ──
     function loadSettings() {
       let parsed = null;
@@ -110,6 +114,7 @@ $(
         return {
           _version: SETTINGS_VERSION,
           modeOverride: 'auto',
+          autoJumpEnabled: getLegacyAutoJumpEnabled(),
           profiles: {
             pc: JSON.parse(JSON.stringify(DEFAULT_PROFILE_PC)),
             mobile: JSON.parse(JSON.stringify(DEFAULT_PROFILE_MOBILE)),
@@ -133,6 +138,7 @@ $(
         parsed = {
           _version: 2,
           modeOverride: 'auto',
+          autoJumpEnabled: getLegacyAutoJumpEnabled(),
           profiles: {
             pc: JSON.parse(JSON.stringify(legacyProfile)),
             mobile: JSON.parse(JSON.stringify(legacyProfile)),
@@ -142,27 +148,30 @@ $(
 
       // 通用迁移逻辑 (V2 -> V3, 以及未来版本的字段补齐)
       if (parsed._version < SETTINGS_VERSION) {
-         const defs = { pc: DEFAULT_PROFILE_PC, mobile: DEFAULT_PROFILE_MOBILE };
-         for (const env of ['pc', 'mobile']) {
-            if (!parsed.profiles[env]) parsed.profiles[env] = {};
-            for (const key in defs[env]) {
-                if (typeof parsed.profiles[env][key] === 'undefined') {
-                    // 用户旧版档案中缺少的字段，用默认设置补上
-                    if (Array.isArray(defs[env][key])) {
-                        parsed.profiles[env][key] = [...defs[env][key]];
-                    } else if (typeof defs[env][key] === 'object' && defs[env][key] !== null) {
-                        parsed.profiles[env][key] = JSON.parse(JSON.stringify(defs[env][key]));
-                    } else {
-                        parsed.profiles[env][key] = defs[env][key];
-                    }
-                }
+        const defs = { pc: DEFAULT_PROFILE_PC, mobile: DEFAULT_PROFILE_MOBILE };
+        for (const env of ['pc', 'mobile']) {
+          if (!parsed.profiles[env]) parsed.profiles[env] = {};
+          for (const key in defs[env]) {
+            if (typeof parsed.profiles[env][key] === 'undefined') {
+              // 用户旧版档案中缺少的字段，用默认设置补上
+              if (Array.isArray(defs[env][key])) {
+                parsed.profiles[env][key] = [...defs[env][key]];
+              } else if (typeof defs[env][key] === 'object' && defs[env][key] !== null) {
+                parsed.profiles[env][key] = JSON.parse(JSON.stringify(defs[env][key]));
+              } else {
+                parsed.profiles[env][key] = defs[env][key];
+              }
             }
-         }
-         if (typeof parsed.modeOverride === 'undefined') parsed.modeOverride = 'auto';
-         parsed._version = SETTINGS_VERSION;
+          }
+        }
+        if (typeof parsed.modeOverride === 'undefined') parsed.modeOverride = 'auto';
+        if (typeof parsed.autoJumpEnabled === 'undefined') {
+          parsed.autoJumpEnabled = getLegacyAutoJumpEnabled();
+        }
+        parsed._version = SETTINGS_VERSION;
 
-         // 迁移完成后执行一次保存，覆盖旧版结构，更新至最新版本代号
-         saveSettings(parsed);
+        // 迁移完成后执行一次保存，覆盖旧版结构，更新至最新版本代号
+        saveSettings(parsed);
       }
 
       return parsed;
@@ -331,7 +340,7 @@ $(
     let pressCoords = { x: 0, y: 0 };
     let lastTriggerWasTouch = false;
 
-    const isAutoJumpEnabled = localStorage.getItem('k-pc-radial-auto-jump') !== 'false';
+    let isAutoJumpEnabled = true;
 
     const EDIT_CONFIG = {
       RE_ENTRY_GUARD_DELAY: 100,
@@ -343,8 +352,9 @@ $(
         MESSAGE: '.mes',
         EDIT_BUTTONS: ['.mes_edit', '.fa-edit', '.fa-pencil'],
         DONE_BUTTON: '.mes_edit_done',
-        EDITOR: 'textarea:not(.reasoning_edit_textarea):visible, [contenteditable="true"]:visible',
-        ST_EDITOR_TEXTAREA: '#curEditTextarea, textarea.edit_textarea, .mes_text textarea:not(.reasoning_edit_textarea)',
+        EDITOR: 'textarea:visible, [contenteditable="true"]:visible',
+        ST_EDITOR_TEXTAREA:
+          '#curEditTextarea, textarea.edit_textarea, textarea.reasoning_edit_textarea, .mes_text textarea',
         SCROLL_CONTAINERS: ['.simplebar-content-wrapper', '#chat', '.chat-area', '#chat_container'],
       },
       ATTRIBUTES: { TEMP_TARGET: 'data-k-radial-edit-target' },
@@ -1374,7 +1384,7 @@ $(
       const T = targetFinger;
       // 取消 150 字符的区域限制，直接在全量数据中暴力滑窗。
       // 因为现代 JS 引擎即便对 10000 字符文本进行滑窗运算，耗时也仅需 10-30 毫秒。
-      // 破除区域限制后，能完美抵抗由巨量前置 DOM 节点（如大量被翻译的文本/隐形代码库）导致的极端坐标轴偏移。
+      // 彻底破除区域限制后，能完美抵抗由巨量前置 DOM 节点（如大量被翻译的文本/隐形代码库）导致的极端坐标轴偏移。
       const searchSpace = rawFinger;
 
       let bestScore = -1;
@@ -1496,19 +1506,22 @@ $(
       endIndex,
       exactStartOffset,
       exactEndOffset,
+      isReasoning = false,
     ) {
+      const areaLabel = isReasoning ? '思维链' : '段落';
       log(
-        `[编辑流程] showParagraphEditPopup mesid=${mesid}, range=[${startIndex}:${endIndex}], text="${paragraphText.substring(0, 40)}"`,
+        `[编辑流程] showParagraphEditPopup mesid=${mesid}, reasoning=${isReasoning}, range=[${startIndex}:${endIndex}], text="${paragraphText.substring(0, 40)}"`,
       );
       const $editWrapper = $(`
-            <div style="width:100%;">
-                <div style="margin-bottom:8px;font-weight:600;">编辑段落 (楼层 ${mesid})</div>
+            <div style="width:100%; position:relative; z-index:2; isolation:isolate;">
+                <div style="margin-bottom:8px;font-weight:600;">编辑${areaLabel} (楼层 ${mesid})</div>
                 <textarea id="k-radial-edit-textarea" style="
                     width:100%; min-height:80px; max-height:60vh; resize:vertical;
                     padding:10px; border-radius:8px; font-size:14px; line-height:1.6;
                     border:1px solid rgba(128,128,128,0.3); background:rgba(0,0,0,0.05);
                     color:inherit; font-family:inherit; box-sizing:border-box;
                     overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+                    position:relative; z-index:3; transform:translateZ(0);
                 ">${$('<span/>').text(paragraphText).html()}</textarea>
             </div>
         `);
@@ -1518,6 +1531,19 @@ $(
         if (ta) {
           ta.style.height = 'auto';
           ta.style.height = Math.min(ta.scrollHeight + 4, window.parent.innerHeight * 0.6) + 'px';
+
+          // 安卓全屏 + 智能编辑时，部分主题/插件会创建更高层级容器导致编辑框被正文覆盖
+          // 这里在弹窗渲染后强制抬高相关容器层级，避免 textarea “沉底”
+          const $ta = $(ta);
+          $ta.css({ position: 'relative', 'z-index': '3', transform: 'translateZ(0)' });
+          $ta.parent().css({ position: 'relative', 'z-index': '2', isolation: 'isolate' });
+          $ta
+            .closest('.swal2-popup, .popup, .dialogue_popup, .ui-dialog, [class*="popup"]')
+            .css({ position: 'relative', 'z-index': '2147483646', transform: 'translateZ(0)' });
+          $ta
+            .closest('.swal2-container, .popup_container, .ui-widget-overlay, [class*="overlay"]')
+            .css({ 'z-index': '2147483647' });
+
           ta.focus();
 
           if (exactStartOffset !== undefined && exactEndOffset !== undefined) {
@@ -1558,16 +1584,38 @@ $(
       if (editedText === undefined || editedText === null) return;
       if (editedText === paragraphText) return; // 无改动
 
-      // 精确 splice 回写
-      const rawMes = SillyTavern.chat[mesid]?.mes ?? '';
-      const newMes = rawMes.slice(0, startIndex) + editedText + rawMes.slice(endIndex);
+      if (isReasoning) {
+        // 思维链内容存储在 extra.reasoning，需特殊回写
+        const stMsg = SillyTavern.chat[mesid];
+        const rawReasoning = stMsg?.extra?.reasoning ?? '';
+        const newReasoning = rawReasoning.slice(0, startIndex) + editedText + rawReasoning.slice(endIndex);
+        if (stMsg && stMsg.extra) {
+          stMsg.extra.reasoning = newReasoning;
+        }
+        // 保存并刷新 UI
+        const ok = await safeSetChatMessages([{ message_id: parseInt(mesid, 10) }], { refresh: 'affected' });
+        if (!ok) {
+          // fallback: 手动触发保存
+          try {
+            await ST.saveChat();
+          } catch (e) {}
+          try {
+            SillyTavern.updateReasoningUI(parseInt(mesid, 10), { reset: true });
+          } catch (e) {}
+        }
+        toastr.success(`${areaLabel}已保存`);
+      } else {
+        // 精确 splice 回写
+        const rawMes = SillyTavern.chat[mesid]?.mes ?? '';
+        const newMes = rawMes.slice(0, startIndex) + editedText + rawMes.slice(endIndex);
 
-      const ok = await safeSetChatMessages([{ message_id: parseInt(mesid, 10), message: newMes }]);
-      if (!ok) {
-        toastr.error('保存失败');
-        return;
+        const ok = await safeSetChatMessages([{ message_id: parseInt(mesid, 10), message: newMes }]);
+        if (!ok) {
+          toastr.error('保存失败');
+          return;
+        }
+        toastr.success(`${areaLabel}已保存`);
       }
-      toastr.success('段落已保存');
     }
 
     // ── 选区驱动的编辑入口（双端统一）─────────────────────────────────────────
@@ -1595,32 +1643,35 @@ $(
 
       const range = selection.getRangeAt(0);
       const startNode = range.startContainer;
-      const mesTextEl = (startNode.nodeType === Node.TEXT_NODE ? startNode.parentElement : startNode)?.closest?.(
-        '.mes_text',
-      );
-      if (!mesTextEl) {
+      const startEl = startNode.nodeType === Node.TEXT_NODE ? startNode.parentElement : startNode;
+      const mesTextEl = startEl?.closest?.('.mes_text');
+      const mesReasoningEl = startEl?.closest?.('.mes_reasoning');
+      const isReasoningSelection = !mesTextEl && !!mesReasoningEl;
+      const containerEl = mesTextEl || mesReasoningEl;
+      if (!containerEl) {
         toastr.warning('请在消息区域内选字');
         return;
       }
 
-      const mesEl = mesTextEl.closest('[mesid]');
+      const mesEl = containerEl.closest('[mesid]');
       const mesid = mesEl?.getAttribute('mesid');
       if (!mesid) {
         toastr.error('无法获取楼层 ID');
         return;
       }
 
-      // 获取前置文本（从 mes_text 开头到选区起点）
+      // 获取前置文本（从容器开头到选区起点）
       const preRange = range.cloneRange();
-      preRange.selectNodeContents(mesTextEl);
+      preRange.selectNodeContents(containerEl);
       preRange.setEnd(range.startContainer, range.startOffset);
       const precedingText = preRange.toString();
 
-      // 获取原始消息
+      // 获取原始消息（思维链内容存储在 extra.reasoning 中）
       const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
-      const rawMes = ctx?.chat?.[mesid]?.mes;
+      const stMsg = ctx?.chat?.[mesid];
+      const rawMes = isReasoningSelection ? stMsg?.extra?.reasoning || '' : stMsg?.mes || '';
       if (!rawMes) {
-        toastr.error('无法获取原始消息数据');
+        toastr.error(isReasoningSelection ? '无法获取思维链数据' : '无法获取原始消息数据');
         return;
       }
 
@@ -1643,7 +1694,7 @@ $(
       if (!isMobileDevice()) {
         const exactRawMatch = rawMes.substring(result.matchRawStart, result.matchRawEnd + 1);
         const messageCard = parentDoc.querySelector(`.mes[mesid="${mesid}"]`);
-        handleSmartEdit(messageCard, exactRawMatch);
+        handleSmartEdit(messageCard, exactRawMatch, isReasoningSelection);
         return;
       }
 
@@ -1656,6 +1707,7 @@ $(
         result.endIndex,
         exactStartOffset,
         exactEndOffset,
+        isReasoningSelection,
       );
     }
 
@@ -1804,11 +1856,11 @@ $(
       if (hasTextSelected) {
         const range = selection.getRangeAt(0);
         const startNode = range.startContainer;
-        const inMesText = (startNode.nodeType === Node.TEXT_NODE ? startNode.parentElement : startNode)?.closest?.(
-          '.mes_text',
-        );
-        if (!inMesText) {
-          // 选区不在 .mes_text 内 → 不显示铅笔，也不锁状态
+        const startEl = startNode.nodeType === Node.TEXT_NODE ? startNode.parentElement : startNode;
+        const inMesText = startEl?.closest?.('.mes_text');
+        const inMesReasoning = startEl?.closest?.('.mes_reasoning');
+        if (!inMesText && !inMesReasoning) {
+          // 选区不在 .mes_text 或 .mes_reasoning 内 → 不显示铅笔，也不锁状态
           return false;
         }
 
@@ -2129,7 +2181,7 @@ $(
     }
 
     // ── PC smart-edit (kept for PC double-click) ────────────────────────────────
-    function handleSmartEdit(forceCard, forceText) {
+    function handleSmartEdit(forceCard, forceText, isReasoning = false) {
       if (isSmartEditing) return;
       isSmartEditing = true;
       try {
@@ -2138,7 +2190,7 @@ $(
           const mc = stEd.closest(EDIT_CONFIG.SELECTORS.MESSAGE);
           if (mc.length) saveAndCloseEditor(mc);
         } else {
-          startEditing(forceCard, forceText);
+          startEditing(forceCard, forceText, isReasoning);
         }
       } finally {
         setTimeout(() => {
@@ -2146,7 +2198,7 @@ $(
         }, EDIT_CONFIG.RE_ENTRY_GUARD_DELAY);
       }
     }
-    function startEditing(forceCard, forceText) {
+    function startEditing(forceCard, forceText, isReasoning = false) {
       const { target, selectedText } = forceCard
         ? { target: $(forceCard), selectedText: forceText || '' }
         : determineEditTarget();
@@ -2158,7 +2210,7 @@ $(
         target.removeAttr(EDIT_CONFIG.ATTRIBUTES.TEMP_TARGET);
         previousScrollPosition = null;
       } else {
-        waitForEditorAndHighlight(`[${EDIT_CONFIG.ATTRIBUTES.TEMP_TARGET}="true"]`, selectedText);
+        waitForEditorAndHighlight(`[${EDIT_CONFIG.ATTRIBUTES.TEMP_TARGET}="true"]`, selectedText, isReasoning);
       }
     }
     function saveAndCloseEditor(messageCard) {
@@ -2208,13 +2260,23 @@ $(
         selectedText: '',
       };
     }
-    function waitForEditorAndHighlight(sel, txt) {
+    function waitForEditorAndHighlight(sel, txt, isReasoning = false) {
       const te = $(window.parent.document).find(sel);
       if (!te.length) return;
       const cleanup = o => {
         o?.disconnect();
         clearTimeout(tid);
         te.removeAttr(EDIT_CONFIG.ATTRIBUTES.TEMP_TARGET);
+      };
+
+      // 根据是否编辑思维链，选择对应的编辑器
+      const findEditor = () => {
+        if (isReasoning) {
+          // 优先寻找思维链专用 textarea
+          const reasoningEd = te.find('textarea.reasoning_edit_textarea:visible');
+          if (reasoningEd.length) return reasoningEd.first();
+        }
+        return te.find(EDIT_CONFIG.SELECTORS.EDITOR).first();
       };
 
       const onReady = ed => {
@@ -2258,7 +2320,7 @@ $(
       };
 
       const obs = new MutationObserver((m, o) => {
-        const ed = te.find(EDIT_CONFIG.SELECTORS.EDITOR).first();
+        const ed = findEditor();
         if (ed.length) {
           cleanup(o);
           onReady(ed[0]);
@@ -2271,7 +2333,7 @@ $(
       }, EDIT_CONFIG.EDITOR_APPEAR_TIMEOUT);
       obs.observe(te[0], { childList: true, subtree: true });
 
-      const init = te.find(EDIT_CONFIG.SELECTORS.EDITOR).first();
+      const init = findEditor();
       if (init.length) {
         cleanup(obs);
         onReady(init[0]);
@@ -2313,50 +2375,69 @@ $(
         let foundEi = -1;
 
         // 分离出具有实际匹配价值的核心片段（按换行符切断）
-        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length >= 4);
+        const lines = text
+          .split('\n')
+          .map(l => l.trim())
+          .filter(l => l.length >= 4);
         if (lines.length > 0) {
-            // 前向寻找最早匹配到的行或最少 10 字符碎块
-            outerStart: for (const line of lines) {
-                let match = tc.indexOf(line);
-                if (match !== -1) { foundSi = match; break outerStart; }
-                for (let k = 0; k <= line.length - 8; k += 4) {
-                   const piece = line.substr(k, 10);
-                   match = tc.indexOf(piece);
-                   if (match !== -1) { foundSi = match; break outerStart; }
-                }
+          // 前向寻找最早匹配到的行或最少 10 字符碎块
+          outerStart: for (const line of lines) {
+            let match = tc.indexOf(line);
+            if (match !== -1) {
+              foundSi = match;
+              break outerStart;
             }
+            for (let k = 0; k <= line.length - 8; k += 4) {
+              const piece = line.substr(k, 10);
+              match = tc.indexOf(piece);
+              if (match !== -1) {
+                foundSi = match;
+                break outerStart;
+              }
+            }
+          }
 
-            // 后向寻找最晚匹配到的行或最少 10 字符碎块
-            outerEnd: for (let i = lines.length - 1; i >= 0; i--) {
-                const line = lines[i];
-                let match = tc.lastIndexOf(line);
-                if (match !== -1) { foundEi = match + line.length; break outerEnd; }
-                for (let k = line.length; k >= 8; k -= 4) {
-                   const piece = line.substr(Math.max(0, k - 10), Math.min(10, k));
-                   match = tc.lastIndexOf(piece);
-                   if (match !== -1) { foundEi = match + piece.length; break outerEnd; }
-                }
+          // 后向寻找最晚匹配到的行或最少 10 字符碎块
+          outerEnd: for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i];
+            let match = tc.lastIndexOf(line);
+            if (match !== -1) {
+              foundEi = matcons + line.length;
+              break outerEnd;
             }
+            for (let k = line.length; k >= 8; k -= 4) {
+              const piece = line.substr(Math.max(0, k - 10), Math.min(10, k));
+              match = tc.lastIndexOf(piece);
+              if (match !== -1) {
+                foundEi = match + piece.length;
+                break outerEnd;
+              }
+            }
+          }
         }
 
         if (foundSi !== -1 || foundEi !== -1) {
-            // 如果找到至少一头，则按照纯文本长度粗略推算另一头
-            si = foundSi !== -1 ? foundSi : Math.max(0, foundEi - text.length);
-            ei = foundEi !== -1 ? foundEi : Math.min(tc.length, foundSi + text.length);
-            if (si > ei) { let t = si; si = ei; ei = t; }
+          // 如果找到至少一头，则按照纯文本长度粗略推算另一头
+          si = foundSi !== -1 ? foundSi : Math.max(0, foundEi - text.length);
+          ei = foundEi !== -1 ? foundEi : Math.min(tc.length, foundSi + text.length);
+          if (si > ei) {
+            let t = si;
+            si = ei;
+            ei = t;
+          }
         } else {
-            // 降级：连 10 字符的碎片都被 Markdown 切断了，退一步进行 4 字符“显微镜”地毯搜索
-            // 哪怕只高亮原码里的这 4 个字符，也比直接罢工报错强
-            for (let i = 0; i <= text.length - 4; i += 2) {
-                const piece = text.substr(i, 4);
-                if (!piece.trim()) continue;
-                const match = tc.indexOf(piece);
-                if (match !== -1) {
-                    si = match;
-                    ei = match + piece.length;
-                    break;
-                }
+          // 极度降级：连 10 字符的碎片都被 Markdown 切断了，退一步进行 4 字符“显微镜”地毯搜索
+          // 哪怕只高亮原码里的这 4 个字符，也比直接罢工报错强
+          for (let i = 0; i <= text.length - 4; i += 2) {
+            const piece = text.substr(i, 4);
+            if (!piece.trim()) continue;
+            const match = tc.indexOf(piece);
+            if (match !== -1) {
+              si = match;
+              ei = match + piece.length;
+              break;
             }
+          }
         }
       }
 
@@ -2844,7 +2925,7 @@ $(
     function loadSortableJS(parentDoc) {
       return new Promise(resolve => {
         if (parentDoc.defaultView.Sortable) return resolve(parentDoc.defaultView.Sortable);
-        const script = parentDoc.createElement('script');
+      const script = parentDoc.createElement('script');
         script.src = 'https://fastly.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js';
         script.onload = () => resolve(parentDoc.defaultView.Sortable);
         script.onerror = () => {
@@ -3003,6 +3084,13 @@ $(
           tempProfiles[currentTab].mobileTriggerMode = e.target.value;
           renderContent();
         }
+        if (e.target.id === 'k-radial-auto-jump-toggle') {
+          isAutoJumpEnabled = e.target.checked;
+          currentSettings.autoJumpEnabled = isAutoJumpEnabled;
+          // 仅保存到脚本变量（saveSettings 内部会按项目既有机制统一处理）
+          saveSettings(currentSettings);
+          renderContent();
+        }
       });
 
       overlay.addEventListener('input', e => {
@@ -3081,6 +3169,15 @@ $(
                         <input type="checkbox" id="k-radial-prevent-dblclick" ${p.preventDoubleTapDefault ? 'checked' : ''} style="opacity:0;width:0;height:0;" ${p.toolbarMode || p.mobileTriggerMode !== 'doubleTap' ? 'disabled' : ''}>
                         <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:${p.preventDoubleTapDefault ? 'var(--SmartThemeQuoteColor,#4caf8a)' : 'rgba(255,255,255,0.15)'};border-radius:22px;transition:background .2s;"></span>
                         <span style="position:absolute;top:2px;left:${p.preventDoubleTapDefault ? '22px' : '2px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></span>
+                    </label>
+                </div>
+                <!-- auto jump settings switch -->
+                <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <div class="k-radial-settings-section-title" style="margin:0; font-size:0.9em; text-transform:none;" title="产生新消息时自动将屏幕滚动至底部">新消息自动滚动至顶部</div>
+                    <label style="position:relative;display:inline-block;width:42px;height:22px;cursor:pointer;">
+                        <input type="checkbox" id="k-radial-auto-jump-toggle" ${isAutoJumpEnabled ? 'checked' : ''} style="opacity:0;width:0;height:0;">
+                        <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:${isAutoJumpEnabled ? 'var(--SmartThemeQuoteColor,#4caf8a)' : 'rgba(255,255,255,0.15)'};border-radius:22px;transition:background .2s;"></span>
+                        <span style="position:absolute;top:2px;left:${isAutoJumpEnabled ? '22px' : '2px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></span>
                     </label>
                 </div>
                 <div class="k-radial-settings-section" style="display:flex; justify-content:space-between; align-items:center;">
@@ -3276,8 +3373,8 @@ $(
 
       // 寻找扩展面板容器
       const $extensionsSettings = $('#extensions_settings2', parentDoc).length
-          ? $('#extensions_settings2', parentDoc)
-          : $('#extensions_settings', parentDoc);
+        ? $('#extensions_settings2', parentDoc)
+        : $('#extensions_settings', parentDoc);
 
       if ($extensionsSettings.length === 0) {
         console.warn('[RadialMenu] 找不到扩展设置容器');
@@ -3286,8 +3383,12 @@ $(
 
       // 创建折叠面板结构 (兼容 ST inline-drawer)
       const $drawer = $('<div class="inline-drawer"></div>');
-      const $toggle = $('<div class="inline-drawer-toggle inline-drawer-header"><b>轮盘快捷菜单</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button"></div></div>');
-      const $content = $('<div class="inline-drawer-content" style="display: none; padding-top: 5px; padding-bottom: 10px;"></div>');
+      const $toggle = $(
+        '<div class="inline-drawer-toggle inline-drawer-header"><b>轮盘快捷菜单</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0" role="button"></div></div>',
+      );
+      const $content = $(
+        '<div class="inline-drawer-content" style="display: none; padding-top: 5px; padding-bottom: 10px;"></div>',
+      );
 
       const btn = parentDoc.createElement('button');
       btn.className = 'menu_button';
@@ -3484,7 +3585,7 @@ $(
       }
 
       const eff = getEffectiveSettings();
-      const isMultiTap = (eff.mobileTriggerMode === 'doubleTap' || eff.mobileTriggerMode === 'tripleTap');
+      const isMultiTap = eff.mobileTriggerMode === 'doubleTap' || eff.mobileTriggerMode === 'tripleTap';
       if (isMultiTap) {
         const touch = e.originalEvent.changedTouches
           ? e.originalEvent.changedTouches[0]
@@ -3637,6 +3738,7 @@ $(
 
       knownChatLength = typeof SillyTavern !== 'undefined' && SillyTavern.chat ? SillyTavern.chat.length : -1;
       currentSettings = loadSettings();
+      isAutoJumpEnabled = currentSettings.autoJumpEnabled !== false;
       injectStyles();
       createAndInjectUI();
       mountSettingsEntry();
@@ -3651,7 +3753,6 @@ $(
       setTimeout(patchIframeSelections, 10000);
 
       safeEventMakeLast('CHAT_CHANGED', () => {
-        knownChatLength = typeof SillyTavern !== 'undefined' && SillyTavern.chat ? SillyTavern.chat.length : -1;
         robustAutoJump(false, false);
         setTimeout(patchIframeSelections, 1000);
         setTimeout(patchIframeSelections, 3000);
